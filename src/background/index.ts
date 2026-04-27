@@ -4,13 +4,16 @@ import { getSettings, saveSettings } from "../lib/settings";
 import {
   clearCaptures,
   createCapture,
+  getCapture,
   getCaptureStats,
-  listCaptures
+  listCaptures,
+  listCapturesForPage
 } from "../lib/storage";
 import { syncCaptures } from "../lib/strixApi";
 import type { CaptureDraft } from "../types/capture";
 
 const IMAGE_MENU_ID = "strix-save-image";
+const pendingRestores = new Map<number, { scrollY?: number; textQuote?: string }>();
 
 browser.runtime.onInstalled.addListener(async () => {
   await browser.contextMenus.removeAll();
@@ -58,10 +61,16 @@ browser.runtime.onMessage.addListener((message: unknown) => {
       return createCapture(request.draft).then((capture) => ({ capture }));
     case "captures:list":
       return listCaptures(request.limit).then((captures) => ({ captures }));
+    case "captures:for-url":
+      return listCapturesForPage(request.url, request.canonicalUrl).then((captures) => ({
+        captures
+      }));
     case "captures:stats":
       return getCaptureStats().then((stats) => ({ stats }));
     case "captures:sync":
       return getSettings().then(syncCaptures);
+    case "captures:open":
+      return openCapture(request.captureId).then(() => ({ ok: true }));
     case "captures:clear":
       return clearCaptures().then(() => ({ ok: true }));
     case "settings:get":
@@ -72,3 +81,54 @@ browser.runtime.onMessage.addListener((message: unknown) => {
       return undefined;
   }
 });
+
+browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status !== "complete") {
+    return;
+  }
+
+  const restore = pendingRestores.get(tabId);
+  if (!restore) {
+    return;
+  }
+
+  pendingRestores.delete(tabId);
+  browser.tabs.sendMessage(tabId, {
+    type: "strix:restore-context",
+    ...restore
+  }).catch(() => undefined);
+});
+
+async function openCapture(captureId: string): Promise<void> {
+  const capture = await getCapture(captureId);
+  if (!capture) {
+    throw new Error("Capture not found.");
+  }
+
+  const url = urlWithTextFragment(
+    capture.source.url,
+    capture.context.textFragment ?? capture.context.textQuote
+  );
+  const tab = await browser.tabs.create({ url });
+
+  if (tab.id && (capture.context.scrollY !== undefined || capture.context.textQuote)) {
+    pendingRestores.set(tab.id, {
+      scrollY: capture.context.scrollY,
+      textQuote: capture.context.textQuote
+    });
+  }
+}
+
+function urlWithTextFragment(url: string, text?: string): string {
+  if (!text?.trim()) {
+    return url;
+  }
+
+  try {
+    const parsed = new URL(url);
+    parsed.hash = `:~:text=${encodeURIComponent(text.trim())}`;
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}

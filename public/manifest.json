@@ -19,6 +19,5 @@
     }
   ],
   "host_permissions": ["<all_urls>"],
-  "permissions": ["activeTab", "clipboardWrite", "contextMenus", "storage"],
-  "options_page": "options.html"
+  "permissions": ["activeTab", "clipboardWrite", "contextMenus", "storage"]
 }

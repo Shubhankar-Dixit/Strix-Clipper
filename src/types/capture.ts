@@ -1,4 +1,4 @@
-export type CaptureKind = "page" | "selection" | "bookmark" | "image";
+export type CaptureKind = "page" | "selection" | "bookmark" | "image" | "highlight";
 
 export type CaptureDestinationTarget =
   | "strix-captures"
@@ -31,6 +31,8 @@ export type CaptureContent = {
 export type CaptureContext = {
   scrollY?: number;
   textQuote?: string;
+  textFragment?: string;
+  pageKey?: string;
   viewport?: {
     width: number;
     height: number;

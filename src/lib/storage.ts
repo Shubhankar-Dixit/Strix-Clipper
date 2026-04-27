@@ -59,6 +59,13 @@ function transaction<T>(
 }
 
 export async function createCapture(draft: CaptureDraft): Promise<CaptureRecord> {
+  if (draft.kind === "highlight") {
+    const existing = await findDuplicateHighlight(draft);
+    if (existing) {
+      return existing;
+    }
+  }
+
   const settings = await getSettings();
   const now = new Date().toISOString();
   const capture: CaptureRecord = {
@@ -91,6 +98,34 @@ export async function listCaptures(limit?: number): Promise<CaptureRecord[]> {
   return captures
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .slice(0, limit ?? captures.length);
+}
+
+export async function getCapture(id: string): Promise<CaptureRecord | undefined> {
+  return transaction<CaptureRecord>("readonly", (store) => store.get(id));
+}
+
+export async function listCapturesForPage(
+  url: string,
+  canonicalUrl?: string
+): Promise<CaptureRecord[]> {
+  const pageKeys = new Set([normalizePageKey(url), normalizePageKey(canonicalUrl)]);
+  const captures = await listCaptures();
+
+  return captures.filter((capture) => {
+    const captureKeys = new Set([
+      normalizePageKey(capture.context.pageKey),
+      normalizePageKey(capture.source.canonicalUrl),
+      normalizePageKey(capture.source.url)
+    ]);
+
+    for (const key of pageKeys) {
+      if (key && captureKeys.has(key)) {
+        return true;
+      }
+    }
+
+    return false;
+  });
 }
 
 export async function clearCaptures(): Promise<void> {
@@ -137,4 +172,40 @@ export async function updateSyncStatus(
   };
   await putCapture(updated);
   return updated;
+}
+
+function findDuplicateHighlight(draft: CaptureDraft): Promise<CaptureRecord | undefined> {
+  const quote = draft.context.textQuote?.trim();
+  if (!quote) {
+    return Promise.resolve(undefined);
+  }
+
+  const draftKey = normalizePageKey(
+    draft.context.pageKey ?? draft.source.canonicalUrl ?? draft.source.url
+  );
+
+  return listCaptures().then((captures) =>
+    captures.find(
+      (capture) =>
+        capture.kind === "highlight" &&
+        capture.context.textQuote?.trim() === quote &&
+        normalizePageKey(
+          capture.context.pageKey ?? capture.source.canonicalUrl ?? capture.source.url
+        ) === draftKey
+    )
+  );
+}
+
+function normalizePageKey(value?: string): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return value.split("#")[0];
+  }
 }

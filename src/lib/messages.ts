@@ -6,19 +6,27 @@ import type {
   StrixClipperSettings
 } from "../types/capture";
 
-export type ContentExtractKind = "page" | "selection" | "bookmark";
+export type ContentExtractKind = "page" | "selection" | "bookmark" | "highlight";
 
-export type ContentMessage = {
-  type: "strix:extract";
-  kind: ContentExtractKind;
-  defaultDestination?: CaptureDestinationTarget;
-};
+export type ContentMessage =
+  | {
+      type: "strix:extract";
+      kind: ContentExtractKind;
+      defaultDestination?: CaptureDestinationTarget;
+    }
+  | {
+      type: "strix:restore-context";
+      scrollY?: number;
+      textQuote?: string;
+    };
 
 export type BackgroundMessage =
   | { type: "captures:create"; draft: CaptureDraft }
   | { type: "captures:list"; limit?: number }
+  | { type: "captures:for-url"; url: string; canonicalUrl?: string }
   | { type: "captures:stats" }
   | { type: "captures:sync" }
+  | { type: "captures:open"; captureId: string }
   | { type: "captures:clear" }
   | { type: "settings:get" }
   | { type: "settings:set"; settings: StrixClipperSettings };
