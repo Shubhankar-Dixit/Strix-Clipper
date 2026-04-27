@@ -1,0 +1,48 @@
+import type {
+  CaptureDestinationTarget,
+  CaptureDraft,
+  CaptureRecord,
+  CaptureStats,
+  StrixClipperSettings
+} from "../types/capture";
+
+export type ContentExtractKind = "page" | "selection" | "bookmark";
+
+export type ContentMessage = {
+  type: "strix:extract";
+  kind: ContentExtractKind;
+  defaultDestination?: CaptureDestinationTarget;
+};
+
+export type BackgroundMessage =
+  | { type: "captures:create"; draft: CaptureDraft }
+  | { type: "captures:list"; limit?: number }
+  | { type: "captures:stats" }
+  | { type: "captures:sync" }
+  | { type: "captures:clear" }
+  | { type: "settings:get" }
+  | { type: "settings:set"; settings: StrixClipperSettings };
+
+export type CreateCaptureResponse = {
+  capture: CaptureRecord;
+};
+
+export type ListCapturesResponse = {
+  captures: CaptureRecord[];
+};
+
+export type StatsResponse = {
+  stats: CaptureStats;
+};
+
+export type SyncResponse = {
+  skipped: boolean;
+  attempted: number;
+  synced: number;
+  failed: number;
+  message: string;
+};
+
+export type SettingsResponse = {
+  settings: StrixClipperSettings;
+};

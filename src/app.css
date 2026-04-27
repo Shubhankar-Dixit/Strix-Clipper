@@ -1,0 +1,297 @@
+:root {
+  /* Minimalist Capture Board Palette */
+  --bg: #0E0E0E;
+  --bg-panel: #141414;
+  --bg-card: #181818;
+  
+  --border: #2A2A2A;
+  --border-focus: #404040;
+
+  --text-main: #BDB5AA; /* Dull text with a slight touch of brown */
+  --text-muted: #747C8A; /* Muted blue-gray */
+  --text-dim: #545A66;
+
+  --accent-blue: #4F7AB0;
+  --accent-cream: #D5CBBF;
+  --accent-green: #488E70;
+  --accent-yellow: #B0944F;
+
+  /* Typography - No Serifs, Minimalist */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace;
+
+  /* Sizing Constraints */
+  --popup-width: 380px;
+  --popup-height: auto; /* let it adapt */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  width: var(--popup-width);
+  height: var(--popup-height);
+  font-family: var(--font-sans);
+  background-color: var(--bg);
+  color: var(--text-main);
+  box-sizing: border-box;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: inherit;
+}
+
+button {
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+
+textarea, input {
+  font-family: var(--font-sans);
+}
+
+/* ====================================================
+   Bento Flow Grid (Popup)
+   ==================================================== */
+.bento-flow {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  padding: 16px;
+  gap: 16px;
+  background: var(--bg);
+}
+
+.bento-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.bento-header .logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--text-main);
+}
+
+.bento-header .logo svg {
+  width: 18px;
+  height: 18px;
+  color: var(--accent);
+}
+
+.actions-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.status-msg {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+.status-msg.active {
+  color: var(--accent);
+}
+
+.icon-tool {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+.icon-tool:hover {
+  background: var(--bg-card);
+  color: var(--text-main);
+}
+.icon-tool svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Base Grid */
+.bento-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Grid Cell Architecture */
+.bento-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bento-card.span-all {
+  grid-column: span 2;
+}
+.bento-card.span-half {
+  grid-column: span 1;
+}
+
+.bento-card label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+/* Inputs & Textareas */
+.bento-input {
+  background: var(--bg-input);
+  border: 1px solid transparent;
+  color: var(--text-main);
+  padding: 8px 10px;
+  font-size: 13px;
+  border-radius: var(--radius-sm);
+  width: 100%;
+  outline: none;
+  transition: border 0.2s, background 0.2s;
+}
+.bento-input:focus {
+  border-color: var(--accent);
+  background: var(--bg-panel);
+}
+
+.title-input {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.url-card {
+  overflow: hidden;
+}
+.url-text {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 4px 0;
+  font-family: var(--font-mono);
+}
+
+.bento-textarea {
+  background: var(--bg-input);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 10px;
+  flex: 1;
+  resize: none;
+  outline: none;
+  line-height: 1.5;
+  transition: all 0.2s;
+}
+.bento-textarea:focus {
+  color: var(--text-main);
+  border-color: var(--accent);
+  background: var(--bg-panel);
+}
+
+.content-card {
+  flex: 1;
+}
+
+/* Tag Input specifics */
+.action-card {
+  padding: 8px;
+}
+.tag-input-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.tag-input-wrapper svg {
+  position: absolute;
+  left: 10px;
+  width: 14px;
+  height: 14px;
+  color: var(--text-dim);
+}
+.tag-input-wrapper input {
+  padding-left: 32px;
+}
+
+/* Bottom Action Row (Buttons) */
+.actions-bar {
+  flex-direction: row;
+  padding: 8px;
+  background: transparent;
+  border: none;
+  gap: 12px;
+}
+
+.bento-btn {
+  flex: 1;
+  background: var(--bg-card);
+  color: var(--text-main);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 0;
+  font-size: 13px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: all 0.2s;
+}
+.bento-btn:hover:not(:disabled) {
+  background: var(--border);
+  border-color: var(--border-focus);
+}
+.bento-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.primary-btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  flex: 1.5;
+}
+.primary-btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border: none;
+}
+.primary-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.loading-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}

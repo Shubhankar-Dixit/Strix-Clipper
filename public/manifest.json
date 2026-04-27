@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Strix Clipper",
+  "description": "Local-first browser clipping for Strix.",
+  "version": "0.1.0",
+  "action": {
+    "default_title": "Strix Clipper",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "assets/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["assets/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "host_permissions": ["<all_urls>"],
+  "permissions": ["activeTab", "clipboardWrite", "contextMenus", "storage"],
+  "options_page": "options.html"
+}
