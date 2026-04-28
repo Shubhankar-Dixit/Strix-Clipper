@@ -19,6 +19,20 @@ export function captureToMarkdown(capture: CaptureRecord): string {
     lines.push(`Scroll: ${Math.round(capture.context.scrollY)}px`);
   }
 
+  if (capture.context.video) {
+    const seconds = Math.max(0, Math.floor(capture.context.video.timestampSeconds));
+    lines.push(`Video: ${capture.context.video.provider}`);
+    lines.push(`Timestamp: ${seconds}s`);
+
+    if (capture.context.video.videoId) {
+      lines.push(`Video ID: ${capture.context.video.videoId}`);
+    }
+  }
+
+  if (capture.context.threadUrl) {
+    lines.push(`Thread: ${capture.context.threadUrl}`);
+  }
+
   if (capture.context.imageUrl) {
     lines.push("");
     lines.push(`![Captured image](${capture.context.imageUrl})`);

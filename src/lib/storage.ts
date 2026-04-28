@@ -68,6 +68,30 @@ export async function createCapture(draft: CaptureDraft): Promise<CaptureRecord>
 
   const settings = await getSettings();
   const now = new Date().toISOString();
+
+  if (draft.kind === "bookmark") {
+    const existing = await findDuplicateBookmark(draft);
+    if (existing) {
+      const updated: CaptureRecord = {
+        ...existing,
+        ...draft,
+        id: existing.id,
+        createdAt: existing.createdAt,
+        destination: {
+          target: draft.destination?.target ?? existing.destination.target ?? settings.defaultDestination,
+          noteId: draft.destination?.noteId ?? existing.destination.noteId,
+          folderId: draft.destination?.folderId ?? existing.destination.folderId,
+          tags: draft.destination?.tags ?? existing.destination.tags
+        },
+        sync: {
+          status: "local"
+        }
+      };
+      await putCapture(updated);
+      return updated;
+    }
+  }
+
   const capture: CaptureRecord = {
     ...draft,
     id: createId(),
@@ -193,6 +217,26 @@ function findDuplicateHighlight(draft: CaptureDraft): Promise<CaptureRecord | un
       (capture) =>
         capture.kind === "highlight" &&
         capture.context.textQuote?.trim() === quote &&
+        normalizePageKey(
+          capture.context.pageKey ?? capture.source.canonicalUrl ?? capture.source.url
+        ) === draftKey
+    )
+  );
+}
+
+function findDuplicateBookmark(draft: CaptureDraft): Promise<CaptureRecord | undefined> {
+  const draftKey = normalizePageKey(
+    draft.context.pageKey ?? draft.source.canonicalUrl ?? draft.source.url
+  );
+
+  if (!draftKey) {
+    return Promise.resolve(undefined);
+  }
+
+  return listCaptures().then((captures) =>
+    captures.find(
+      (capture) =>
+        capture.kind === "bookmark" &&
         normalizePageKey(
           capture.context.pageKey ?? capture.source.canonicalUrl ?? capture.source.url
         ) === draftKey

@@ -6,7 +6,14 @@ import type {
   StrixClipperSettings
 } from "../types/capture";
 
-export type ContentExtractKind = "page" | "selection" | "bookmark" | "highlight";
+export type ContentExtractKind =
+  | "smart"
+  | "page"
+  | "selection"
+  | "bookmark"
+  | "highlight"
+  | "video-moment"
+  | "thread";
 
 export type ContentMessage =
   | {

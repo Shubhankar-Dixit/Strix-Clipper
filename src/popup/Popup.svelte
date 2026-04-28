@@ -1,6 +1,7 @@
 <script lang="ts">
   import browser from "webextension-polyfill";
   import type {
+    ContentExtractKind,
     CreateCaptureResponse,
     ListCapturesResponse,
     SettingsResponse,
@@ -55,7 +56,9 @@
   let selectedBox = "Inbox";
   let boxes = ["Inbox", "Moodboard", "Ideas", "Research", "Music"];
   let customFolder = "";
-  let captureMode: "page" | "selection" | "highlight" | "bookmark" = "page";
+  let selectedDestination: CaptureDestinationTarget = "strix-captures";
+  let captureMode: ContentExtractKind = "smart";
+  let editTimestamp = "";
 
   function getBoxSymbol(box: string) {
     switch (box) {
@@ -112,6 +115,64 @@
     return target ? { target } : undefined;
   }
 
+  function formatTimestamp(seconds?: number): string {
+    const rounded = Math.max(0, Math.floor(seconds ?? 0));
+    const hours = Math.floor(rounded / 3600);
+    const minutes = Math.floor((rounded % 3600) / 60);
+    const remaining = rounded % 60;
+
+    if (hours > 0) {
+      return `${hours}:${String(minutes).padStart(2, "0")}:${String(remaining).padStart(2, "0")}`;
+    }
+
+    return `${minutes}:${String(remaining).padStart(2, "0")}`;
+  }
+
+  function parseTimestamp(value: string): number | undefined {
+    const parts = value.trim().split(":").map((part) => Number(part));
+    if (!parts.length || parts.some((part) => !Number.isFinite(part) || part < 0)) {
+      return undefined;
+    }
+
+    if (parts.length === 1) {
+      return parts[0];
+    }
+
+    if (parts.length === 2) {
+      return parts[0] * 60 + parts[1];
+    }
+
+    if (parts.length === 3) {
+      return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    }
+
+    return undefined;
+  }
+
+  function urlWithTimestamp(url: string, seconds: number): string {
+    try {
+      const parsed = new URL(url);
+      const rounded = String(Math.max(0, Math.floor(seconds)));
+
+      if (parsed.hostname.includes("youtube.com") || parsed.hostname === "youtu.be") {
+        parsed.searchParams.set("t", rounded);
+      } else {
+        parsed.hash = `t=${rounded}`;
+      }
+
+      return parsed.toString();
+    } catch {
+      return url;
+    }
+  }
+
+  function applyDraftToEditor(draft: CaptureDraft) {
+    editTitle = draft.source.title || currentTab?.title || "";
+    editUrl = draft.source.url || currentTab?.url || "";
+    editDescription = draft.content.excerpt || "";
+    editTimestamp = draft.context.video ? formatTimestamp(draft.context.video.timestampSeconds) : "";
+  }
+
   async function activeTab(): Promise<ActiveTab> {
     const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) {
@@ -144,30 +205,31 @@
     captures = listResponse.captures;
     stats = statsResponse.stats;
     settings = settingsResponse.settings;
+    selectedDestination = settings.defaultDestination;
 
     try {
       pageDraft = await extract(captureMode);
-      editTitle = pageDraft.source.title || currentTab?.title || "";
-      editUrl = pageDraft.source.url || currentTab?.url || "";
-      editDescription = pageDraft.content.excerpt || "";
+      applyDraftToEditor(pageDraft);
     } catch {
       editTitle = currentTab?.title || "";
       editUrl = currentTab?.url || "";
+      editTimestamp = "";
     }
   }
 
-  async function extract(kind: "page" | "selection" | "highlight" | "bookmark"): Promise<CaptureDraft> {
+  async function extract(kind: ContentExtractKind): Promise<CaptureDraft> {
     const tab = await activeTab();
     try {
       return (await browser.tabs.sendMessage(tab.id, {
         type: "strix:extract",
         kind,
-        defaultDestination: settings.defaultDestination
+        defaultDestination: selectedDestination
       })) as CaptureDraft;
     } catch {
       const capturedAt = new Date().toISOString();
+      const fallbackKind: CaptureDraft["kind"] = kind === "smart" ? "page" : kind;
       return {
-        kind,
+        kind: fallbackKind,
         source: {
           url: tab.url ?? "",
           title: tab.title,
@@ -178,7 +240,7 @@
           text: tab.title
         },
         context: {},
-        destination: destination(settings.defaultDestination)
+        destination: destination(selectedDestination)
       };
     }
   }
@@ -187,21 +249,43 @@
     const markdown = draft.content.markdown ?? draft.content.selectionText ?? draft.content.text ?? "";
     const customTag = selectedBox === "Custom" ? [] : [selectedBox];
     const folderId = selectedBox === "Custom" ? customFolder.trim() || undefined : undefined;
+    const editedTimestamp =
+      draft.context.video && editTimestamp.trim()
+        ? parseTimestamp(editTimestamp)
+        : undefined;
+    const sourceUrl =
+      draft.context.video && editedTimestamp !== undefined
+        ? urlWithTimestamp(editUrl.trim() || draft.source.url, editedTimestamp)
+        : editUrl.trim() || draft.source.url;
+    const videoMarkdown =
+      draft.context.video && editedTimestamp !== undefined
+        ? `[${editTitle.trim() || draft.source.title || "Video moment"} @ ${formatTimestamp(editedTimestamp)}](${sourceUrl})`
+        : markdown;
 
     return {
       ...draft,
       source: {
         ...draft.source,
         title: editTitle.trim() || draft.source.title,
-        url: editUrl.trim() || draft.source.url
+        url: sourceUrl
       },
       content: {
         ...draft.content,
         excerpt: editDescription.trim() || draft.content.excerpt,
-        markdown: editDescription.trim() ? `> [!abstract] Note\n> ${editDescription.trim()}\n\n${markdown}` : markdown
+        markdown: editDescription.trim() ? `> [!abstract] Note\n> ${editDescription.trim()}\n\n${videoMarkdown}` : videoMarkdown
+      },
+      context: {
+        ...draft.context,
+        video:
+          draft.context.video && editedTimestamp !== undefined
+            ? {
+                ...draft.context.video,
+                timestampSeconds: editedTimestamp
+              }
+            : draft.context.video
       },
       destination: {
-        target: settings.defaultDestination || "strix-captures",
+        target: selectedDestination || settings.defaultDestination || "strix-captures",
         folderId,
         tags: customTag.filter(Boolean) as string[]
       }
@@ -231,7 +315,12 @@
     status = "Saving draft...";
     try {
       const draft = applyEdits(pageDraft ?? (await extract(captureMode)));
-      if ((captureMode === "selection" || captureMode === "highlight") && !draft.content.selectionText?.trim()) {
+      if (draft.context.video && editTimestamp.trim() && parseTimestamp(editTimestamp) === undefined) {
+        status = "Use a timestamp like 1:23 or 01:02:03.";
+        return;
+      }
+
+      if (draft.kind === "selection" && !draft.content.selectionText?.trim()) {
         status = "Select page text before saving a selection.";
         return;
       }
@@ -249,7 +338,7 @@
     }
   }
 
-  async function save(kind: "page" | "selection" | "highlight" | "bookmark") {
+  async function save(kind: ContentExtractKind) {
     busy = true;
     status = "Capturing...";
     try {
@@ -403,15 +492,13 @@
     }
   }
 
-  async function setCaptureMode(mode: "page" | "selection" | "highlight" | "bookmark") {
+  async function setCaptureMode(mode: ContentExtractKind) {
     captureMode = mode;
     busy = true;
     status = `Extracting ${mode}...`;
     try {
       pageDraft = await extract(mode);
-      editTitle = pageDraft.source.title || currentTab?.title || "";
-      editUrl = pageDraft.source.url || currentTab?.url || "";
-      editDescription = pageDraft.content.excerpt || "";
+      applyDraftToEditor(pageDraft);
       status = "Ready";
     } catch {
       status = `Failed to extract ${mode}.`;
@@ -422,6 +509,18 @@
 
   function captureTitle(capture: CaptureRecord): string {
     return capture.source.title || capture.content.selectionText || capture.source.url;
+  }
+
+  function captureKindLabel(kind?: string): string {
+    switch (kind) {
+      case "video-moment": return "Video moment";
+      case "thread": return "Thread";
+      case "selection": return "Selection";
+      case "bookmark": return "Bookmark";
+      case "highlight": return "Highlight";
+      case "page": return "Page";
+      default: return "Smart clip";
+    }
   }
 
   function compactUrl(url: string): string {
@@ -442,24 +541,13 @@
     <div class="header-title">STRIX CLIPPER</div>
     <div class="header-right">
       <div class="mode-switcher" aria-label="Capture mode">
-        <button class="mode-btn {captureMode === 'page' ? 'active' : ''}" disabled={busy} onclick={() => setCaptureMode("page")} aria-label="Page capture" title="Page">
+        <button class="mode-btn smart-mode-btn {captureMode === 'smart' ? 'active' : ''}" disabled={busy} onclick={() => setCaptureMode("smart")} aria-label="Smart clip" title="Smart Clip">
           <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M7 3.75h7.1L18 7.65v12.6H7z" />
-            <path d="M14 3.75v4h4" />
-            <path d="M9.75 11h5.5M9.75 14h5.5M9.75 17h3" />
+            <path d="M12 3.75v3.5M12 16.75v3.5M20.25 12h-3.5M7.25 12h-3.5" />
+            <path d="m17.85 6.15-2.5 2.5M8.65 15.35l-2.5 2.5M17.85 17.85l-2.5-2.5M8.65 8.65l-2.5-2.5" />
+            <path d="M12 8.75a3.25 3.25 0 1 1 0 6.5 3.25 3.25 0 0 1 0-6.5z" />
           </svg>
-        </button>
-        <button class="mode-btn {captureMode === 'selection' ? 'active' : ''}" disabled={busy} onclick={() => setCaptureMode("selection")} aria-label="Selection capture" title="Selection">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M6.25 7.25V5.5h1.75M16 5.5h1.75v1.75M17.75 16.75v1.75H16M8 18.5H6.25v-1.75" />
-            <path d="M9.25 9.5h5.5M9.25 12h4.5M9.25 14.5h6" />
-          </svg>
-        </button>
-        <button class="mode-btn {captureMode === 'bookmark' ? 'active' : ''}" disabled={busy} onclick={() => setCaptureMode("bookmark")} aria-label="Bookmark capture" title="Bookmark">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M7.5 4.5h9v15l-4.5-3-4.5 3z" />
-            <path d="M9.75 7.5h4.5" />
-          </svg>
+          <span>Smart</span>
         </button>
         <button class="mode-btn highlight-mode-btn {captureMode === 'highlight' ? 'active' : ''}" disabled={busy} onclick={activateHighlightMode} aria-label="Highlight mode" title="Highlight">
           <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -522,8 +610,14 @@
     <div class="board-section">
       <div class="section-label">SOURCE</div>
       <div class="section-content source-dense">
+        <div class="capture-kind-row">
+          <span class="capture-kind">{captureKindLabel(pageDraft?.kind)}</span>
+        </div>
         <input bind:value={editTitle} class="dense-input font-bold" placeholder="Title" spellcheck="false" />
         <input bind:value={editUrl} class="dense-input text-gray" placeholder="URL" spellcheck="false" />
+        {#if pageDraft?.context.video}
+          <input bind:value={editTimestamp} class="dense-input text-gray timestamp-input" placeholder="Timestamp" spellcheck="false" />
+        {/if}
         <textarea bind:value={editDescription} rows="2" class="dense-input" placeholder="Clip note or description..."></textarea>
       </div>
     </div>
@@ -531,38 +625,49 @@
     <div class="board-section">
       <div class="section-label">SAVE AS</div>
       <div class="section-content save-as-stack">
-      <div class="nest-boxes">
-        {#each boxes as box}
-          <button
-            class="nest-btn {selectedBox === box ? 'active' : ''}"
-            disabled={busy}
-            onclick={() => (selectedBox = box)}
-          >
-            <span class="symbol">{box === 'Inbox' && selectedBox === box ? '●' : getBoxSymbol(box)}</span>
-            <span class="box-text">{box}</span>
-          </button>
-        {/each}
-        <button
-          class="nest-btn {selectedBox === 'Custom' ? 'active' : ''}"
-          disabled={busy}
-          onclick={() => (selectedBox = 'Custom')}
-        >
-          <span class="symbol">+</span>
-          <span class="box-text">Folder</span>
-        </button>
-      </div>
-      {#if selectedBox === 'Custom'}
-        <div class="custom-folder-row">
-          <input
-            bind:value={customFolder}
-            class="folder-input inline-folder-input"
-            autocomplete="off"
-            placeholder="Folder name"
-            spellcheck="false"
-          />
-          <div class="folder-help">Type a folder name for this clip.</div>
+        <div class="destination-row" aria-label="Destination target">
+          {#each destinations as destination}
+            <button
+              class="target-btn {selectedDestination === destination ? 'active' : ''}"
+              disabled={busy}
+              onclick={() => (selectedDestination = destination)}
+            >
+              {destination}
+            </button>
+          {/each}
         </div>
-      {/if}
+        <div class="nest-boxes">
+          {#each boxes as box}
+            <button
+              class="nest-btn {selectedBox === box ? 'active' : ''}"
+              disabled={busy}
+              onclick={() => (selectedBox = box)}
+            >
+              <span class="symbol">{box === 'Inbox' && selectedBox === box ? '●' : getBoxSymbol(box)}</span>
+              <span class="box-text">{box}</span>
+            </button>
+          {/each}
+          <button
+            class="nest-btn {selectedBox === 'Custom' ? 'active' : ''}"
+            disabled={busy}
+            onclick={() => (selectedBox = 'Custom')}
+          >
+            <span class="symbol">+</span>
+            <span class="box-text">Folder</span>
+          </button>
+        </div>
+        {#if selectedBox === 'Custom'}
+          <div class="custom-folder-row">
+            <input
+              bind:value={customFolder}
+              class="folder-input inline-folder-input"
+              autocomplete="off"
+              placeholder="Folder name"
+              spellcheck="false"
+            />
+            <div class="folder-help">Type a folder name for this clip.</div>
+          </div>
+        {/if}
       </div>
     </div>
 
@@ -656,12 +761,15 @@
     border-radius: 999px;
     background: transparent;
     color: var(--text-muted);
-    width: 28px;
+    min-width: 28px;
     height: 28px;
-    padding: 0;
+    padding: 0 7px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    gap: 5px;
+    font-size: 11px;
+    font-weight: 600;
     transition: background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
   }
 
@@ -679,6 +787,26 @@
   .mode-btn.active {
     background: var(--bg-panel);
     color: var(--text-main);
+  }
+
+  .capture-kind-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .capture-kind {
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--accent-cream);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 2px 7px;
+    text-transform: uppercase;
+  }
+
+  .timestamp-input {
+    color: var(--accent-yellow);
   }
 
   .highlight-mode-btn.active,
@@ -725,6 +853,31 @@
 
   .save-as-stack {
     gap: 8px;
+  }
+
+  .destination-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .target-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 4px 7px;
+    text-transform: uppercase;
+    transition: color 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
+  }
+
+  .target-btn:hover:not(:disabled),
+  .target-btn.active {
+    background: rgba(255, 255, 255, 0.03);
+    border-color: var(--border-focus);
+    color: var(--accent-cream);
   }
 
   .nest-boxes {

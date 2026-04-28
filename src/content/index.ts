@@ -9,7 +9,8 @@ import type {
   CaptureDestinationTarget,
   CaptureDraft,
   CaptureRecord,
-  CaptureSource
+  CaptureSource,
+  CaptureContext
 } from "../types/capture";
 
 const turndown = new TurndownService({
@@ -130,6 +131,182 @@ function destination(target?: CaptureDestinationTarget) {
   return target ? { target } : undefined;
 }
 
+function secondsLabel(seconds: number): string {
+  const rounded = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  const remaining = rounded % 60;
+
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(remaining).padStart(2, "0")}`;
+  }
+
+  return `${minutes}:${String(remaining).padStart(2, "0")}`;
+}
+
+function getYouTubeVideoId(url = location.href): string | undefined {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname.includes("youtube.com")) {
+      return parsed.searchParams.get("v") ?? undefined;
+    }
+
+    if (parsed.hostname === "youtu.be") {
+      return parsed.pathname.split("/").filter(Boolean)[0];
+    }
+  } catch {
+    return undefined;
+  }
+
+  return undefined;
+}
+
+function timestampedVideoUrl(timestampSeconds: number): string {
+  try {
+    const parsed = new URL(location.href);
+    const seconds = String(Math.max(0, Math.floor(timestampSeconds)));
+
+    if (parsed.hostname.includes("youtube.com") || parsed.hostname === "youtu.be") {
+      parsed.searchParams.set("t", seconds);
+      return parsed.toString();
+    }
+
+    parsed.hash = `t=${seconds}`;
+    return parsed.toString();
+  } catch {
+    return location.href;
+  }
+}
+
+function activeVideoElement(): HTMLVideoElement | undefined {
+  const videos = [...document.querySelectorAll<HTMLVideoElement>("video")];
+  return videos.find((video) => !video.paused && video.currentTime > 0) ?? videos[0];
+}
+
+function hasVideoMoment(): boolean {
+  const video = activeVideoElement();
+  return Boolean(video && Number.isFinite(video.currentTime) && video.currentTime > 0);
+}
+
+function isThreadLikePage(): boolean {
+  const host = location.hostname.toLowerCase();
+  return host.includes("twitter.com") || host.includes("x.com");
+}
+
+function getVideoAuthor(source: CaptureSource): string | undefined {
+  const host = location.hostname.toLowerCase();
+  if (host.includes("youtube.com")) {
+    const channel =
+      document.querySelector<HTMLElement>("ytd-video-owner-renderer #channel-name a") ??
+      document.querySelector<HTMLElement>("#owner #channel-name a") ??
+      document.querySelector<HTMLElement>('link[itemprop="name"]');
+
+    const channelName =
+      channel instanceof HTMLLinkElement
+        ? channel.getAttribute("content") || channel.textContent
+        : channel?.textContent;
+
+    return channelName?.trim() || source.author;
+  }
+
+  return source.author;
+}
+
+function extractVideoMoment(source: CaptureSource, defaultDestination?: CaptureDestinationTarget): CaptureDraft {
+  const video = activeVideoElement();
+  const timestampSeconds = video?.currentTime ?? 0;
+  const durationSeconds =
+    video && Number.isFinite(video.duration) ? video.duration : undefined;
+  const youtubeId = getYouTubeVideoId();
+  const host = location.hostname.toLowerCase();
+  const provider: NonNullable<CaptureContext["video"]>["provider"] = youtubeId
+    ? "youtube"
+    : host.includes("twitter.com") || host.includes("x.com")
+      ? "x"
+      : host.includes("vimeo.com")
+        ? "vimeo"
+        : "generic";
+  const timeLabel = secondsLabel(timestampSeconds);
+  const videoUrl = timestampedVideoUrl(timestampSeconds);
+  const selectionText = selectedText();
+  const note = selectionText || `Video moment at ${timeLabel}`;
+
+  return {
+    kind: "video-moment",
+    source: {
+      ...source,
+      url: videoUrl,
+      author: getVideoAuthor(source)
+    },
+    content: {
+      selectionText,
+      text: note,
+      markdown: `[${source.title || "Video moment"} @ ${timeLabel}](${videoUrl})`,
+      excerpt: note
+    },
+    context: {
+      scrollY: window.scrollY,
+      textQuote: selectionText,
+      textFragment: textFragment(selectionText),
+      pageKey: getPageKey(source),
+      viewport: getViewport(),
+      video: {
+        provider,
+        videoId: youtubeId,
+        timestampSeconds,
+        durationSeconds
+      }
+    },
+    destination: destination(defaultDestination)
+  };
+}
+
+function closestTweetArticle(): HTMLElement | undefined {
+  const selection = window.getSelection();
+  const anchor = selection?.anchorNode;
+  const anchorElement =
+    anchor instanceof Element ? anchor : anchor?.parentElement ?? undefined;
+  return (
+    anchorElement?.closest<HTMLElement>("article") ??
+    document.querySelector<HTMLElement>("article") ?? undefined
+  );
+}
+
+function extractThreadCapture(source: CaptureSource, defaultDestination?: CaptureDestinationTarget): CaptureDraft {
+  const article = closestTweetArticle();
+  const selectionText = selectedText();
+  const articleText = article?.innerText?.trim();
+  const text = selectionText || articleText || document.body?.innerText?.trim();
+  const author =
+    article?.querySelector<HTMLElement>('[data-testid="User-Name"]')?.innerText
+      ?.split("\n")
+      .filter(Boolean)
+      .join(" ") || source.author;
+
+  return {
+    kind: "thread",
+    source: {
+      ...source,
+      author
+    },
+    content: {
+      selectionText,
+      text,
+      markdown: text ? `${text}\n\nSource: ${location.href}` : `Source: ${location.href}`,
+      excerpt: text?.slice(0, 280)
+    },
+    context: {
+      scrollY: window.scrollY,
+      textQuote: selectionText,
+      textFragment: textFragment(selectionText),
+      pageKey: getPageKey(source),
+      viewport: getViewport(),
+      threadUrl: location.href
+    },
+    destination: destination(defaultDestination)
+  };
+}
+
 function isSelectionEligibleForHighlight(): boolean {
   const selection = window.getSelection();
   if (!selection || selection.isCollapsed) {
@@ -204,6 +381,38 @@ function jumpToHighlight(): void {
 function extractDraft(message: Extract<ContentMessage, { type: "strix:extract" }>): CaptureDraft {
   const source = getSource();
   const selectionText = selectedText();
+
+  if (message.kind === "smart") {
+    if (hasVideoMoment()) {
+      return extractVideoMoment(source, message.defaultDestination);
+    }
+
+    if (isThreadLikePage()) {
+      return extractThreadCapture(source, message.defaultDestination);
+    }
+
+    if (selectionText) {
+      return extractDraft({
+        type: "strix:extract",
+        kind: "selection",
+        defaultDestination: message.defaultDestination
+      });
+    }
+
+    return extractDraft({
+      type: "strix:extract",
+      kind: "page",
+      defaultDestination: message.defaultDestination
+    });
+  }
+
+  if (message.kind === "video-moment") {
+    return extractVideoMoment(source, message.defaultDestination);
+  }
+
+  if (message.kind === "thread") {
+    return extractThreadCapture(source, message.defaultDestination);
+  }
 
   if (message.kind === "selection" || message.kind === "highlight") {
     return {

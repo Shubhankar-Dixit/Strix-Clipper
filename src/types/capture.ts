@@ -1,4 +1,11 @@
-export type CaptureKind = "page" | "selection" | "bookmark" | "image" | "highlight";
+export type CaptureKind =
+  | "page"
+  | "selection"
+  | "bookmark"
+  | "image"
+  | "highlight"
+  | "video-moment"
+  | "thread";
 
 export type CaptureDestinationTarget =
   | "strix-captures"
@@ -38,6 +45,14 @@ export type CaptureContext = {
     height: number;
   };
   imageUrl?: string;
+  threadUrl?: string;
+  video?: {
+    provider: "youtube" | "x" | "vimeo" | "generic";
+    videoId?: string;
+    timestampSeconds: number;
+    durationSeconds?: number;
+    transcriptText?: string;
+  };
 };
 
 export type CaptureDestination = {
