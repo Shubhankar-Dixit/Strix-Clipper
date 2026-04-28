@@ -1,6 +1,5 @@
 import { Readability } from "@mozilla/readability";
 import TurndownService from "turndown";
-import browser from "webextension-polyfill";
 import type {
   ContentMessage,
   CreateCaptureResponse,
@@ -19,6 +18,28 @@ const turndown = new TurndownService({
 });
 const TOOLBAR_ID = "strix-highlight-toolbar";
 const HIGHLIGHT_CLASS = "strix-restored-highlight";
+const HIGHLIGHT_STYLE_ID = "strix-highlight-style";
+const HIGHLIGHT_MODE_CLASS = "strix-highlight-mode-active";
+
+let pageHighlights: CaptureRecord[] = [];
+let highlightModeActive = false;
+let highlightFocusIndex = 0;
+let autoHighlightInFlight = false;
+let autoHighlightTimer: number | undefined;
+
+function sendRuntimeMessage<T>(message: unknown): Promise<T> {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(message, (response: T) => {
+      const error = chrome.runtime.lastError;
+      if (error) {
+        reject(new Error(error.message));
+        return;
+      }
+
+      resolve(response);
+    });
+  });
+}
 
 function meta(selector: string): string | undefined {
   return document.querySelector<HTMLMetaElement>(selector)?.content?.trim() || undefined;
@@ -109,6 +130,77 @@ function destination(target?: CaptureDestinationTarget) {
   return target ? { target } : undefined;
 }
 
+function isSelectionEligibleForHighlight(): boolean {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed) {
+    return false;
+  }
+
+  const text = selection.toString().trim();
+  if (!text) {
+    return false;
+  }
+
+  const active = document.activeElement as HTMLElement | null;
+  if (
+    active &&
+    (active.tagName === "INPUT" ||
+      active.tagName === "TEXTAREA" ||
+      active.tagName === "SELECT" ||
+      active.isContentEditable)
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function queueAutoHighlight(): void {
+  if (!highlightModeActive) {
+    return;
+  }
+
+  if (autoHighlightTimer !== undefined) {
+    window.clearTimeout(autoHighlightTimer);
+  }
+
+  autoHighlightTimer = window.setTimeout(() => {
+    autoHighlightTimer = undefined;
+
+    if (autoHighlightInFlight) {
+      return;
+    }
+
+    if (!isSelectionEligibleForHighlight()) {
+      updateToolbarPosition();
+      return;
+    }
+
+    autoHighlightInFlight = true;
+    saveHighlightFromSelection()
+      .catch(() => undefined)
+      .finally(() => {
+        autoHighlightInFlight = false;
+        updateToolbarPosition();
+      });
+  }, 60);
+}
+
+function jumpToHighlight(): void {
+  if (!pageHighlights.length) {
+    return;
+  }
+
+  const capture = pageHighlights[highlightFocusIndex % pageHighlights.length];
+  const element = document.querySelector<HTMLElement>(`[data-strix-capture-id="${capture.id}"]`);
+
+  if (element) {
+    element.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+
+  highlightFocusIndex = (highlightFocusIndex + 1) % pageHighlights.length;
+}
+
 function extractDraft(message: Extract<ContentMessage, { type: "strix:extract" }>): CaptureDraft {
   const source = getSource();
   const selectionText = selectedText();
@@ -174,8 +266,21 @@ function extractDraft(message: Extract<ContentMessage, { type: "strix:extract" }
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
   const request = message as ContentMessage;
 
+  if (request.type === "strix:activate-highlight-mode") {
+    activateHighlightMode();
+    sendResponse({ success: true });
+    return false;
+  }
+
+  if (request.type === "strix:refresh-highlights") {
+    refreshPageHighlights().catch(() => undefined);
+    sendResponse({ success: true });
+    return false;
+  }
+
   if (request.type === "strix:restore-context") {
     restoreContext(request.textQuote, request.scrollY);
+    sendResponse({ success: true });
     return false;
   }
 
@@ -199,58 +304,79 @@ function ensureToolbar(): HTMLDivElement {
     "position:fixed",
     "z-index:2147483647",
     "display:none",
-    "align-items:center",
-    "gap:8px",
-    "padding:6px 8px",
-    "border:1px solid rgba(255,255,255,0.16)",
-    "border-radius:6px",
-    "background:#111",
-    "box-shadow:0 8px 24px rgba(0,0,0,0.28)",
+    "flex-direction:column",
+    "align-items:flex-start",
+    "gap:6px",
+    "padding:0",
+    "border:1px solid rgba(255,255,255,0.12)",
+    "border-radius:999px",
+    "background:linear-gradient(180deg, rgba(34,34,36,0.98), rgba(23,23,26,0.98))",
+    "box-shadow:0 10px 28px rgba(0,0,0,0.35)",
+    "backdrop-filter:blur(12px)",
     "color:#f4efe7",
     "font:12px/1.2 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif"
   ].join(";");
 
-  const button = document.createElement("button");
-  button.type = "button";
-  button.textContent = "Save highlight";
-  button.style.cssText = [
-    "border:0",
-    "border-radius:4px",
-    "background:#d5cbbf",
-    "color:#111",
-    "cursor:pointer",
-    "font:600 12px/1 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif",
+  const capsule = document.createElement("div");
+  capsule.style.cssText = [
+    "display:flex",
+    "align-items:center",
+    "gap:8px",
     "padding:6px 8px"
   ].join(";");
-  button.addEventListener("mousedown", (event) => event.preventDefault());
-  button.addEventListener("click", () => {
-    saveHighlightFromSelection().catch(() => undefined);
+
+  const count = document.createElement("button");
+  count.type = "button";
+  count.id = "strix-highlight-count";
+  count.setAttribute("aria-label", "Jump to highlighted text");
+  count.textContent = "0";
+  count.style.cssText = [
+    "min-width:24px",
+    "height:24px",
+    "border:0",
+    "padding:0 8px",
+    "border-radius:999px",
+    "display:inline-flex",
+    "align-items:center",
+    "justify-content:center",
+    "background:rgba(255,255,255,0.08)",
+    "color:#dad3c8",
+    "font:600 12px/1 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif"
+  ].join(";");
+  count.addEventListener("mousedown", (event) => event.preventDefault());
+  count.addEventListener("click", () => {
+    jumpToHighlight();
   });
 
-  toolbar.append(button);
+  const marker = document.createElement("span");
+  marker.setAttribute("aria-hidden", "true");
+  marker.style.cssText = [
+    "width:14px",
+    "height:14px",
+    "display:inline-block",
+    "background:linear-gradient(135deg, #f1d35f 0 48%, #1f1f22 48% 62%, #f4efe7 62%)",
+    "border-radius:3px",
+    "box-shadow:0 0 0 1px rgba(255,255,255,0.18)"
+  ].join(";");
+
+  capsule.append(marker);
+  capsule.append(count);
+  toolbar.append(capsule);
   document.documentElement.append(toolbar);
   return toolbar;
 }
 
 function updateToolbarPosition(): void {
   const toolbar = ensureToolbar();
-  const selection = window.getSelection();
-
-  if (!selection || selection.isCollapsed || !selection.toString().trim()) {
-    hideToolbar();
+  if (highlightModeActive || pageHighlights.length > 0) {
+    toolbar.style.left = `${Math.max(8, window.innerWidth - 84)}px`;
+    toolbar.style.top = "16px";
+    toolbar.style.display = "flex";
+    renderToolbarState();
     return;
   }
 
-  const range = selection.getRangeAt(0);
-  const rect = range.getBoundingClientRect();
-  if (!rect.width && !rect.height) {
-    hideToolbar();
-    return;
-  }
-
-  toolbar.style.left = `${Math.max(8, Math.min(window.innerWidth - 150, rect.left))}px`;
-  toolbar.style.top = `${Math.max(8, rect.top - 42)}px`;
-  toolbar.style.display = "flex";
+  hideToolbar();
 }
 
 function hideToolbar(): void {
@@ -267,29 +393,35 @@ async function saveHighlightFromSelection(): Promise<void> {
     return;
   }
 
-  const response = (await browser.runtime.sendMessage({
+  const response = await sendRuntimeMessage<CreateCaptureResponse>({
     type: "captures:create",
     draft
-  })) as CreateCaptureResponse;
+  });
 
   restoreHighlight(response.capture);
+  await refreshPageHighlights();
   window.getSelection()?.removeAllRanges();
-  hideToolbar();
+  updateToolbarPosition();
 }
 
-async function restoreStoredHighlights(): Promise<void> {
+async function refreshPageHighlights(): Promise<void> {
   const source = getSource();
-  const response = (await browser.runtime.sendMessage({
+  clearRenderedHighlights();
+  const response = await sendRuntimeMessage<ListCapturesResponse>({
     type: "captures:for-url",
     url: source.url,
     canonicalUrl: source.canonicalUrl
-  })) as ListCapturesResponse;
+  });
 
-  for (const capture of response.captures) {
-    if (capture.kind === "highlight") {
-      restoreHighlight(capture);
-    }
+  pageHighlights = response.captures.filter((capture) => capture.kind === "highlight");
+  highlightFocusIndex = 0;
+
+  for (const capture of pageHighlights) {
+    restoreHighlight(capture);
   }
+
+  renderToolbarState();
+  updateToolbarPosition();
 }
 
 function restoreHighlight(capture: CaptureRecord): void {
@@ -303,6 +435,106 @@ function restoreHighlight(capture: CaptureRecord): void {
   }
 
   wrapFirstTextMatch(quote, capture.id);
+}
+
+function renderToolbarState(): void {
+  const toolbar = document.getElementById(TOOLBAR_ID);
+  if (!toolbar) {
+    return;
+  }
+
+  const count = toolbar.querySelector<HTMLButtonElement>("#strix-highlight-count");
+  if (count) {
+    count.textContent = String(pageHighlights.length);
+  }
+}
+
+function removeHighlightFromPage(captureId: string): void {
+  const highlight = document.querySelector<HTMLElement>(`[data-strix-capture-id="${captureId}"]`);
+  if (!highlight) {
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  const children = [...highlight.childNodes];
+
+  if (children.length === 0) {
+    fragment.append(document.createTextNode(highlight.textContent ?? ""));
+  } else {
+    for (const child of children) {
+      fragment.append(child);
+    }
+  }
+
+  highlight.replaceWith(fragment);
+}
+
+function clearRenderedHighlights(): void {
+  for (const highlight of [...document.querySelectorAll<HTMLElement>(`.${HIGHLIGHT_CLASS}`)]) {
+    const fragment = document.createDocumentFragment();
+    const children = [...highlight.childNodes];
+
+    if (children.length === 0) {
+      fragment.append(document.createTextNode(highlight.textContent ?? ""));
+    } else {
+      for (const child of children) {
+        fragment.append(child);
+      }
+    }
+
+    highlight.replaceWith(fragment);
+  }
+}
+
+async function deleteHighlight(capture: CaptureRecord): Promise<void> {
+  await sendRuntimeMessage({
+    type: "captures:delete",
+    captureId: capture.id
+  });
+
+  removeHighlightFromPage(capture.id);
+  pageHighlights = pageHighlights.filter((item) => item.id !== capture.id);
+  highlightFocusIndex = 0;
+  renderToolbarState();
+  updateToolbarPosition();
+}
+
+function activateHighlightMode(): void {
+  highlightModeActive = true;
+  document.documentElement.classList.add(HIGHLIGHT_MODE_CLASS);
+  renderToolbarState();
+  updateToolbarPosition();
+}
+
+function ensureHighlightStyles(): void {
+  if (document.getElementById(HIGHLIGHT_STYLE_ID)) {
+    return;
+  }
+
+  const style = document.createElement("style");
+  style.id = HIGHLIGHT_STYLE_ID;
+  style.textContent = `
+    .${HIGHLIGHT_CLASS} {
+      background: rgba(241, 211, 95, 0.34);
+      border-radius: 999px;
+      box-shadow: inset 0 0 0 1px rgba(176, 148, 79, 0.45);
+      padding: 0.05em 0.18em;
+      -webkit-box-decoration-break: clone;
+      box-decoration-break: clone;
+    }
+
+    .${HIGHLIGHT_MODE_CLASS},
+    .${HIGHLIGHT_MODE_CLASS} body,
+    .${HIGHLIGHT_MODE_CLASS} body * {
+      cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 28 28'%3E%3Cpath fill='%23f1d35f' d='M5 19 18.8 5.2l4 4L9 23H5z'/%3E%3Cpath fill='%23212124' d='m17.2 6.8 1.6-1.6 4 4-1.6 1.6zM5 19l4 4H5z'/%3E%3Cpath fill='%23f4efe7' d='m9 23 12.2-12.2 1.8 1.8L10.8 24.8z' opacity='.75'/%3E%3C/svg%3E") 5 23, text !important;
+    }
+
+    #${TOOLBAR_ID},
+    #${TOOLBAR_ID} * {
+      cursor: default !important;
+    }
+  `;
+  document.documentElement.append(style);
 }
 
 function wrapFirstTextMatch(quote: string, captureId: string): boolean {
@@ -340,7 +572,6 @@ function wrapFirstTextMatch(quote: string, captureId: string): boolean {
   const mark = document.createElement("span");
   mark.className = HIGHLIGHT_CLASS;
   mark.dataset.strixCaptureId = captureId;
-  mark.style.cssText = "background:rgba(213,203,191,0.38); border-radius:2px; box-shadow:0 0 0 1px rgba(213,203,191,0.12);";
 
   try {
     range.surroundContents(mark);
@@ -371,9 +602,11 @@ document.addEventListener("mouseup", (event) => {
   if ((event.target as Element | null)?.closest(`#${TOOLBAR_ID}`)) {
     return;
   }
-  window.setTimeout(updateToolbarPosition, 0);
+  window.setTimeout(queueAutoHighlight, 0);
 });
-document.addEventListener("keyup", () => window.setTimeout(updateToolbarPosition, 0));
-document.addEventListener("scroll", hideToolbar, { passive: true });
+document.addEventListener("keyup", () => window.setTimeout(queueAutoHighlight, 0));
+document.addEventListener("selectionchange", () => window.setTimeout(queueAutoHighlight, 0));
+document.addEventListener("scroll", () => window.setTimeout(updateToolbarPosition, 0), { passive: true });
 
-restoreStoredHighlights().catch(() => undefined);
+ensureHighlightStyles();
+refreshPageHighlights().catch(() => undefined);

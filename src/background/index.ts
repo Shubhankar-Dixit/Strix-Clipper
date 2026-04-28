@@ -4,6 +4,7 @@ import { getSettings, saveSettings } from "../lib/settings";
 import {
   clearCaptures,
   createCapture,
+  deleteCapture,
   getCapture,
   getCaptureStats,
   listCaptures,
@@ -59,6 +60,8 @@ browser.runtime.onMessage.addListener((message: unknown) => {
   switch (request.type) {
     case "captures:create":
       return createCapture(request.draft).then((capture) => ({ capture }));
+    case "captures:delete":
+      return deleteCapture(request.captureId).then(() => ({ ok: true }));
     case "captures:list":
       return listCaptures(request.limit).then((captures) => ({ captures }));
     case "captures:for-url":

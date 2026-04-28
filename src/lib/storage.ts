@@ -91,6 +91,10 @@ export async function putCapture(capture: CaptureRecord): Promise<void> {
   await transaction("readwrite", (store) => store.put(capture));
 }
 
+export async function deleteCapture(id: string): Promise<void> {
+  await transaction("readwrite", (store) => store.delete(id));
+}
+
 export async function listCaptures(limit?: number): Promise<CaptureRecord[]> {
   const captures =
     (await transaction<CaptureRecord[]>("readonly", (store) => store.getAll())) ?? [];

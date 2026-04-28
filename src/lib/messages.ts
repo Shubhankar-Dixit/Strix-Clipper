@@ -15,6 +15,12 @@ export type ContentMessage =
       defaultDestination?: CaptureDestinationTarget;
     }
   | {
+      type: "strix:activate-highlight-mode";
+    }
+  | {
+      type: "strix:refresh-highlights";
+    }
+  | {
       type: "strix:restore-context";
       scrollY?: number;
       textQuote?: string;
@@ -22,6 +28,7 @@ export type ContentMessage =
 
 export type BackgroundMessage =
   | { type: "captures:create"; draft: CaptureDraft }
+  | { type: "captures:delete"; captureId: string }
   | { type: "captures:list"; limit?: number }
   | { type: "captures:for-url"; url: string; canonicalUrl?: string }
   | { type: "captures:stats" }
