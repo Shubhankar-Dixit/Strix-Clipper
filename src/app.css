@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
 
 :root {
   /* Minimalist Capture Board Palette */
@@ -17,13 +17,15 @@
   --accent-cream: #D5CBBF;
   --accent-green: #488E70;
   --accent-yellow: #B0944F;
+  --accent: var(--accent-blue);
+  --accent-hover: #5F8BC2;
 
   /* Typography - Modern & Premium */
   --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --font-mono: var(--font-sans);
 
   /* Sizing Constraints */
-  --popup-width: 380px;
+  --popup-width: 440px;
   --popup-height: auto; /* let it adapt */
   --radius-sm: 4px;
   --radius-md: 6px;

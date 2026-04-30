@@ -7,11 +7,7 @@ export type CaptureKind =
   | "video-moment"
   | "thread";
 
-export type CaptureDestinationTarget =
-  | "strix-captures"
-  | "note"
-  | "memory"
-  | "canvas";
+export type CaptureDestinationTarget = "library";
 
 export type SyncStatus = "local" | "pending" | "synced" | "error";
 

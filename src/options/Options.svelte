@@ -7,22 +7,14 @@
     SyncResponse
   } from "../lib/messages";
   import type {
-    CaptureDestinationTarget,
     CaptureStats,
     StrixClipperSettings
   } from "../types/capture";
 
-  const destinations: CaptureDestinationTarget[] = [
-    "strix-captures",
-    "note",
-    "memory",
-    "canvas"
-  ];
-
   let settings: StrixClipperSettings = {
     apiBaseUrl: "",
     apiToken: "",
-    defaultDestination: "strix-captures"
+    defaultDestination: "library"
   };
   let stats: CaptureStats = {
     total: 0,
@@ -89,7 +81,7 @@
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `strix-captures-${new Date().toISOString()}.json`;
+      anchor.download = `strix-clips-${new Date().toISOString()}.json`;
       anchor.click();
       URL.revokeObjectURL(url);
       status = `Exported ${response.captures.length} capture${response.captures.length === 1 ? "" : "s"}.`;
@@ -147,14 +139,6 @@
           placeholder="Paste a Strix clipper token"
           autocomplete="off"
         />
-      </label>
-      <label>
-        Default Destination
-        <select bind:value={settings.defaultDestination}>
-          {#each destinations as destination}
-            <option value={destination}>{destination.toUpperCase()}</option>
-          {/each}
-        </select>
       </label>
     </div>
     <div class="row">

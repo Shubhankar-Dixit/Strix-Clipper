@@ -10,19 +10,11 @@
   } from "../lib/messages";
   import { captureToMarkdown } from "../lib/markdown";
   import type {
-    CaptureDestinationTarget,
     CaptureDraft,
     CaptureRecord,
     CaptureStats,
     StrixClipperSettings
   } from "../types/capture";
-
-  const destinations: CaptureDestinationTarget[] = [
-    "strix-captures",
-    "note",
-    "memory",
-    "canvas"
-  ];
 
   type ActiveTab = {
     id: number;
@@ -41,7 +33,7 @@
   let settings: StrixClipperSettings = {
     apiBaseUrl: "",
     apiToken: "",
-    defaultDestination: "strix-captures"
+    defaultDestination: "library"
   };
   let status = "Ready";
   let busy = false;
@@ -56,7 +48,6 @@
   let selectedBox = "Inbox";
   let boxes = ["Inbox", "Moodboard", "Ideas", "Research", "Music"];
   let customFolder = "";
-  let selectedDestination: CaptureDestinationTarget = "strix-captures";
   let captureMode: ContentExtractKind = "smart";
   let editTimestamp = "";
 
@@ -205,8 +196,6 @@
     captures = listResponse.captures;
     stats = statsResponse.stats;
     settings = settingsResponse.settings;
-    selectedDestination = settings.defaultDestination;
-
     try {
       pageDraft = await extract(captureMode);
       applyDraftToEditor(pageDraft);
@@ -223,7 +212,7 @@
       return (await browser.tabs.sendMessage(tab.id, {
         type: "strix:extract",
         kind,
-        defaultDestination: selectedDestination
+        defaultDestination: settings.defaultDestination
       })) as CaptureDraft;
     } catch {
       const capturedAt = new Date().toISOString();
@@ -240,7 +229,7 @@
           text: tab.title
         },
         context: {},
-        destination: destination(selectedDestination)
+        destination: destination(settings.defaultDestination)
       };
     }
   }
@@ -285,7 +274,7 @@
             : draft.context.video
       },
       destination: {
-        target: selectedDestination || settings.defaultDestination || "strix-captures",
+        target: settings.defaultDestination,
         folderId,
         tags: customTag.filter(Boolean) as string[]
       }
@@ -463,7 +452,7 @@
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `strix-captures-${new Date().toISOString()}.json`;
+      anchor.download = `strix-clips-${new Date().toISOString()}.json`;
       anchor.click();
       URL.revokeObjectURL(url);
       status = `Exported ${response.captures.length} capture${response.captures.length === 1 ? "" : "s"}.`;
@@ -531,6 +520,99 @@
     }
   }
 
+  function formatDate(value?: string): string {
+    if (!value) {
+      return "";
+    }
+
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return value;
+    }
+
+    return date.toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric"
+    });
+  }
+
+  function titleProperties(): { key: string; value: string; placeholder: string }[] {
+    return [
+      {
+        key: "site",
+        value: hostname,
+        placeholder: "Site"
+      },
+      {
+        key: "author",
+        value: pageDraft?.source.author ?? "",
+        placeholder: "Author"
+      },
+      {
+        key: "created",
+        value: formatDate(pageDraft?.source.capturedAt),
+        placeholder: "Created"
+      },
+      {
+        key: "published",
+        value: formatDate(pageDraft?.source.publishedAt),
+        placeholder: "Published"
+      }
+    ];
+  }
+
+  function contentPreview(): string {
+    return (
+      pageDraft?.content.selectionText ??
+      pageDraft?.content.markdown ??
+      pageDraft?.content.text ??
+      pageDraft?.content.excerpt ??
+      ""
+    ).trim();
+  }
+
+  function sourceLinks(): { label: string; value: string }[] {
+    const links: { label: string; value: string }[] = [];
+
+    if (editUrl.trim()) {
+      links.push({ label: "Source", value: editUrl.trim() });
+    }
+
+    if (pageDraft?.source.canonicalUrl && pageDraft.source.canonicalUrl !== editUrl.trim()) {
+      links.push({ label: "Canonical", value: pageDraft.source.canonicalUrl });
+    }
+
+    if (pageDraft?.context.threadUrl && pageDraft.context.threadUrl !== editUrl.trim()) {
+      links.push({ label: "Thread", value: pageDraft.context.threadUrl });
+    }
+
+    return links;
+  }
+
+  function embedItems(): { label: string; value: string }[] {
+    const embeds: { label: string; value: string }[] = [];
+
+    if (pageDraft?.context.video) {
+      embeds.push({
+        label: pageDraft.context.video.provider,
+        value: `Timestamp ${formatTimestamp(pageDraft.context.video.timestampSeconds)}`
+      });
+    }
+
+    if (pageDraft?.context.imageUrl) {
+      embeds.push({ label: "Image", value: pageDraft.context.imageUrl });
+    }
+
+    pageDraft?.content.imageUrls?.forEach((url, index) => {
+      if (url !== pageDraft?.context.imageUrl) {
+        embeds.push({ label: `Image ${index + 1}`, value: url });
+      }
+    });
+
+    return embeds;
+  }
+
   load().catch((error) => {
     status = error instanceof Error ? error.message : "Unable to load captures.";
   });
@@ -584,14 +666,6 @@
               autocomplete="off"
             />
           </label>
-          <label>
-            Default Destination
-            <select bind:value={settings.defaultDestination}>
-              {#each destinations as destination}
-                <option value={destination}>{destination}</option>
-              {/each}
-            </select>
-          </label>
         </div>
       </div>
 
@@ -606,36 +680,72 @@
       </div>
     </div>
   {:else}
-  <div class="sections">
-    <div class="board-section">
-      <div class="section-label">SOURCE</div>
-      <div class="section-content source-dense">
-        <div class="capture-kind-row">
-          <span class="capture-kind">{captureKindLabel(pageDraft?.kind)}</span>
-        </div>
-        <input bind:value={editTitle} class="dense-input font-bold" placeholder="Title" spellcheck="false" />
-        <input bind:value={editUrl} class="dense-input text-gray" placeholder="URL" spellcheck="false" />
-        {#if pageDraft?.context.video}
-          <input bind:value={editTimestamp} class="dense-input text-gray timestamp-input" placeholder="Timestamp" spellcheck="false" />
-        {/if}
-        <textarea bind:value={editDescription} rows="2" class="dense-input" placeholder="Clip note or description..."></textarea>
+  <div class="sections clip-layout">
+    <div class="board-section title-section">
+      <div class="section-heading">
+        <div class="section-label">TITLE</div>
+        <span class="capture-kind">{captureKindLabel(pageDraft?.kind)}</span>
+      </div>
+      <input bind:value={editTitle} class="title-field" placeholder="Untitled clip" spellcheck="false" />
+      <div class="meta-grid">
+        {#each titleProperties() as property}
+          <div class:empty-property={!property.value}>
+            <strong>{property.value || property.placeholder}</strong>
+          </div>
+        {/each}
       </div>
     </div>
 
     <div class="board-section">
-      <div class="section-label">SAVE AS</div>
-      <div class="section-content save-as-stack">
-        <div class="destination-row" aria-label="Destination target">
-          {#each destinations as destination}
-            <button
-              class="target-btn {selectedDestination === destination ? 'active' : ''}"
-              disabled={busy}
-              onclick={() => (selectedDestination = destination)}
-            >
-              {destination}
-            </button>
+      <div class="section-label">CONTENT</div>
+      <textarea bind:value={editDescription} rows="3" class="annotation-field" placeholder="Add context or summary..."></textarea>
+      <div class="content-preview">
+        {#if contentPreview()}
+          {contentPreview()}
+        {:else}
+          <span class="empty">No extracted content yet.</span>
+        {/if}
+      </div>
+    </div>
+
+    <div class="section-grid">
+      <div class="board-section">
+        <div class="section-label">LINKS</div>
+        <div class="link-list">
+          {#each sourceLinks() as link}
+            <label>
+              <span>{link.label}</span>
+              <input value={link.value} readonly spellcheck="false" />
+            </label>
           {/each}
+          {#if sourceLinks().length === 0}
+            <p class="empty">No links found.</p>
+          {/if}
         </div>
+      </div>
+
+      <div class="board-section">
+        <div class="section-label">EMBEDS</div>
+        <div class="embed-list">
+          {#if pageDraft?.context.video}
+            <input bind:value={editTimestamp} class="timestamp-input embed-timestamp" placeholder="Timestamp" spellcheck="false" />
+          {/if}
+          {#each embedItems() as embed}
+            <div class="embed-row">
+              <span>{embed.label}</span>
+              <strong>{embed.value}</strong>
+            </div>
+          {/each}
+          {#if embedItems().length === 0}
+            <p class="empty">No embeddable media.</p>
+          {/if}
+        </div>
+      </div>
+    </div>
+
+    <div class="board-section">
+      <div class="section-label">ORGANIZE</div>
+      <div class="section-content save-as-stack">
         <div class="nest-boxes">
           {#each boxes as box}
             <button
@@ -717,7 +827,8 @@
     flex-direction: column;
     padding: 16px 20px;
     background: var(--bg);
-    min-height: 340px;
+    min-height: 540px;
+    max-height: 680px;
     height: auto;
     font-family: var(--font-sans);
   }
@@ -789,12 +900,6 @@
     color: var(--text-main);
   }
 
-  .capture-kind-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-
   .capture-kind {
     border: 1px solid var(--border);
     border-radius: 999px;
@@ -824,18 +929,34 @@
   .sections {
     display: flex;
     flex-direction: column;
-    gap: 0;
+    gap: 10px;
     flex: 1;
     min-height: 0;
-    overflow: hidden;
+    overflow-y: auto;
+    padding-right: 4px;
+    scrollbar-color: var(--border-focus) transparent;
+    scrollbar-width: thin;
   }
 
   .board-section {
-    padding: 8px 0;
-    border-bottom: 1px solid var(--border);
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 8px;
+    background: rgba(255, 255, 255, 0.025);
+  }
+
+  .clip-layout {
+    overflow-x: hidden;
+  }
+
+  .section-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
   }
 
   .section-label {
@@ -855,31 +976,6 @@
     gap: 8px;
   }
 
-  .destination-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-
-  .target-btn {
-    background: transparent;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    color: var(--text-muted);
-    font-family: var(--font-mono);
-    font-size: 10px;
-    padding: 4px 7px;
-    text-transform: uppercase;
-    transition: color 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
-  }
-
-  .target-btn:hover:not(:disabled),
-  .target-btn.active {
-    background: rgba(255, 255, 255, 0.03);
-    border-color: var(--border-focus);
-    color: var(--accent-cream);
-  }
-
   .nest-boxes {
     display: flex;
     flex-wrap: wrap;
@@ -892,36 +988,158 @@
     gap: 4px;
   }
 
-  .source-dense {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 6px;
-    background: rgba(255, 255, 255, 0.03);
-    border-radius: 6px;
-    border: 1px solid var(--border);
+  .title-section {
+    gap: 10px;
   }
 
-  .dense-input {
+  .title-field {
     width: 100%;
     background: transparent;
     border: none;
+    border-bottom: 1px solid var(--border);
     color: var(--text-main);
     font-family: inherit;
-    font-size: 13px;
-    padding: 2px 0;
+    font-size: 18px;
+    font-weight: 600;
+    line-height: 1.25;
     outline: none;
-    resize: none;
+    padding: 0 0 8px;
   }
 
-  .font-bold {
+  .title-field:focus {
+    border-bottom-color: var(--border-focus);
+  }
+
+  .meta-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .embed-row,
+  .link-list label {
+    min-width: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: rgba(0, 0, 0, 0.12);
+    padding: 7px 8px;
+  }
+
+  .meta-grid div {
+    min-width: 0;
+    max-width: 124px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.12);
+    padding: 4px 8px;
+  }
+
+  .embed-row span,
+  .link-list span {
+    display: block;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 9px;
+    line-height: 1.2;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+  }
+
+  .embed-row strong {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-muted);
+    font-size: 11px;
     font-weight: 500;
   }
 
-  .text-gray {
+  .meta-grid strong {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     color: var(--text-muted);
-    font-size: 11px;
     font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 500;
+    line-height: 1.25;
+  }
+
+  .meta-grid .empty-property strong {
+    color: var(--text-dim);
+  }
+
+  .annotation-field {
+    min-height: 62px;
+    width: 100%;
+    background: rgba(0, 0, 0, 0.16);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-main);
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 1.45;
+    outline: none;
+    padding: 8px;
+    resize: vertical;
+  }
+
+  .annotation-field:focus {
+    border-color: var(--border-focus);
+  }
+
+  .content-preview {
+    max-height: 118px;
+    overflow: auto;
+    border-left: 2px solid var(--border-focus);
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.45;
+    padding: 2px 0 2px 9px;
+    white-space: pre-wrap;
+  }
+
+  .section-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.75fr);
+    gap: 10px;
+  }
+
+  .link-list,
+  .embed-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .link-list input {
+    width: 100%;
+    overflow: hidden;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    outline: none;
+    padding: 0;
+    text-overflow: ellipsis;
+  }
+
+  .embed-timestamp {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: rgba(0, 0, 0, 0.14);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    outline: none;
+    padding: 7px 8px;
   }
 
   .folder-input {
@@ -1017,8 +1235,7 @@
     text-transform: uppercase;
   }
 
-  .settings-form input,
-  .settings-form select {
+  .settings-form input {
     background: transparent;
     border: none;
     border-bottom: 1px solid var(--border);
@@ -1028,14 +1245,8 @@
     padding: 0 0 8px 0;
   }
 
-  .settings-form input:focus,
-  .settings-form select:focus {
+  .settings-form input:focus {
     border-bottom-color: var(--border-focus);
-  }
-
-  .settings-form option {
-    background: var(--bg);
-    color: var(--text-main);
   }
 
   .settings-actions {
@@ -1049,10 +1260,8 @@
   }
 
   .related-section {
-    flex: 1;
     gap: 10px;
     min-height: 0;
-    border-bottom: none;
   }
 
   .recent-list {
@@ -1152,7 +1361,7 @@
     justify-content: flex-end;
     align-items: center;
     gap: 16px;
-    margin-top: 8px;
+    margin-top: 10px;
     padding-top: 16px;
     border-top: 1px solid var(--border);
   }

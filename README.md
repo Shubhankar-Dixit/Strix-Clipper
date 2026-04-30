@@ -45,6 +45,5 @@ Load the extension:
 
 ## Deferred
 
-Persistent highlights, YouTube timestamps, X/Twitter capture, templates, OAuth,
-and direct note/memory/canvas writes are planned after the base local clipper is
-working.
+Templates, OAuth, and richer server-side routing are planned after the base
+local clipper is working.

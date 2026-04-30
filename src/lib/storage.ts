@@ -78,7 +78,7 @@ export async function createCapture(draft: CaptureDraft): Promise<CaptureRecord>
         id: existing.id,
         createdAt: existing.createdAt,
         destination: {
-          target: draft.destination?.target ?? existing.destination.target ?? settings.defaultDestination,
+          target: draft.destination?.target ?? settings.defaultDestination,
           noteId: draft.destination?.noteId ?? existing.destination.noteId,
           folderId: draft.destination?.folderId ?? existing.destination.folderId,
           tags: draft.destination?.tags ?? existing.destination.tags
