@@ -899,16 +899,6 @@
     color: var(--text-main);
   }
 
-  .capture-kind {
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    color: var(--accent-cream);
-    font-family: var(--font-mono);
-    font-size: 10px;
-    padding: 2px 7px;
-    text-transform: uppercase;
-  }
-
   .timestamp-input {
     color: var(--accent-yellow);
   }
@@ -950,13 +940,6 @@
 
   .clip-layout {
     overflow-x: hidden;
-  }
-
-  .section-heading {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
   }
 
   .section-label {
