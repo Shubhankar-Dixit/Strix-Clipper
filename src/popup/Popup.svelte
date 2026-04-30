@@ -682,10 +682,7 @@
   {:else}
   <div class="sections clip-layout">
     <div class="board-section title-section">
-      <div class="section-heading">
-        <div class="section-label">TITLE</div>
-        <span class="capture-kind">{captureKindLabel(pageDraft?.kind)}</span>
-      </div>
+      <div class="section-label">TITLE</div>
       <input bind:value={editTitle} class="title-field" placeholder="Untitled clip" spellcheck="false" />
       <div class="meta-grid">
         {#each titleProperties() as property}
@@ -697,8 +694,12 @@
     </div>
 
     <div class="board-section">
-      <div class="section-label">CONTENT</div>
+      <div class="section-label">DESCRIPTION</div>
       <textarea bind:value={editDescription} rows="3" class="annotation-field" placeholder="Add context or summary..."></textarea>
+    </div>
+
+    <div class="board-section">
+      <div class="section-label">CONTENT</div>
       <div class="content-preview">
         {#if contentPreview()}
           {contentPreview()}
@@ -827,9 +828,7 @@
     flex-direction: column;
     padding: 16px 20px;
     background: var(--bg);
-    min-height: 540px;
-    max-height: 680px;
-    height: auto;
+    height: 580px;
     font-family: var(--font-sans);
   }
 
@@ -934,6 +933,7 @@
     min-height: 0;
     overflow-y: auto;
     padding-right: 4px;
+    padding-bottom: 8px;
     scrollbar-color: var(--border-focus) transparent;
     scrollbar-width: thin;
   }
@@ -1075,6 +1075,7 @@
 
   .annotation-field {
     min-height: 62px;
+    max-height: 150px;
     width: 100%;
     background: rgba(0, 0, 0, 0.16);
     border: 1px solid var(--border);
@@ -1086,6 +1087,8 @@
     outline: none;
     padding: 8px;
     resize: vertical;
+    white-space: pre-wrap;
+    word-wrap: break-word;
   }
 
   .annotation-field:focus {
@@ -1093,8 +1096,8 @@
   }
 
   .content-preview {
-    max-height: 118px;
-    overflow: auto;
+    max-height: 150px;
+    overflow-y: auto;
     border-left: 2px solid var(--border-focus);
     color: var(--text-muted);
     font-family: var(--font-mono);
@@ -1102,6 +1105,7 @@
     line-height: 1.45;
     padding: 2px 0 2px 9px;
     white-space: pre-wrap;
+    word-wrap: break-word;
   }
 
   .section-grid {
