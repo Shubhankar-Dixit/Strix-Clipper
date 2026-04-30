@@ -180,7 +180,7 @@ export async function getCaptureStats(): Promise<CaptureStats> {
 export async function listSyncableCaptures(): Promise<CaptureRecord[]> {
   const captures = await listCaptures();
   return captures.filter((capture) =>
-    ["local", "error"].includes(capture.sync.status)
+    ["local", "error", "pending"].includes(capture.sync.status)
   );
 }
 

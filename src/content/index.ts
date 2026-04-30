@@ -190,7 +190,7 @@ function hasVideoMoment(): boolean {
 
 function isThreadLikePage(): boolean {
   const host = location.hostname.toLowerCase();
-  return host.includes("twitter.com") || host.includes("x.com");
+  return host === "twitter.com" || host === "x.com" || host.endsWith(".twitter.com") || host.endsWith(".x.com");
 }
 
 function getVideoAuthor(source: CaptureSource): string | undefined {
@@ -221,9 +221,9 @@ function extractVideoMoment(source: CaptureSource, defaultDestination?: CaptureD
   const host = location.hostname.toLowerCase();
   const provider: NonNullable<CaptureContext["video"]>["provider"] = youtubeId
     ? "youtube"
-    : host.includes("twitter.com") || host.includes("x.com")
+    : host === "twitter.com" || host === "x.com" || host.endsWith(".twitter.com") || host.endsWith(".x.com")
       ? "x"
-      : host.includes("vimeo.com")
+      : host === "vimeo.com" || host.endsWith(".vimeo.com")
         ? "vimeo"
         : "generic";
   const timeLabel = secondsLabel(timestampSeconds);
