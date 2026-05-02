@@ -327,6 +327,25 @@
     }
   }
 
+  async function savePageState() {
+    busy = true;
+    status = "Saving position...";
+    try {
+      const draft = applyEdits(await extract("page-state"));
+      const response = await sendMessage<CreateCaptureResponse>({
+        type: "captures:create",
+        draft
+      });
+      const fieldCount = response.capture.context.formState?.fields.length ?? 0;
+      status = `Saved position${fieldCount ? ` with ${fieldCount} entries` : ""}.`;
+      await load();
+    } catch (error) {
+      status = error instanceof Error ? error.message : "Position save failed.";
+    } finally {
+      busy = false;
+    }
+  }
+
   async function save(kind: ContentExtractKind) {
     busy = true;
     status = "Capturing...";
@@ -500,6 +519,61 @@
     return capture.source.title || capture.content.selectionText || capture.source.url;
   }
 
+  function normalizePageKey(value?: string): string | undefined {
+    if (!value) {
+      return undefined;
+    }
+
+    try {
+      const url = new URL(value);
+      url.hash = "";
+      return url.toString();
+    } catch {
+      return value.split("#")[0];
+    }
+  }
+
+  function savedPositionCaptures(): CaptureRecord[] {
+    const currentKeys = new Set(
+      [
+        currentTab?.url,
+        pageDraft?.source.url,
+        pageDraft?.source.canonicalUrl,
+        pageDraft?.context.pageKey
+      ]
+        .map((value) => normalizePageKey(value))
+        .filter(Boolean)
+    );
+
+    return captures
+      .filter((capture) => {
+        if (capture.kind !== "page-state") {
+          return false;
+        }
+
+        if (currentKeys.size === 0) {
+          return true;
+        }
+
+        return [
+          capture.source.url,
+          capture.source.canonicalUrl,
+          capture.context.pageKey,
+          capture.context.formState?.url
+        ]
+          .map((value) => normalizePageKey(value))
+          .some((key) => key && currentKeys.has(key));
+      })
+      .slice(0, 4);
+  }
+
+  function savedPositionMeta(capture: CaptureRecord): string {
+    const fields = capture.context.formState?.fields.length ?? 0;
+    const savedAt = formatDate(capture.context.formState?.savedAt ?? capture.createdAt);
+    const fieldLabel = `${fields} entr${fields === 1 ? "y" : "ies"}`;
+    return savedAt ? `${savedAt} · ${fieldLabel}` : fieldLabel;
+  }
+
   function captureKindLabel(kind?: string): string {
     switch (kind) {
       case "video-moment": return "Video moment";
@@ -507,6 +581,7 @@
       case "selection": return "Selection";
       case "bookmark": return "Bookmark";
       case "highlight": return "Highlight";
+      case "page-state": return "Page position";
       case "page": return "Page";
       default: return "Smart clip";
     }
@@ -782,16 +857,17 @@
       </div>
     </div>
 
-    <div class="board-section related-section">
-      <div class="section-label">RELATED</div>
-      <div class="recent-list">
-        {#if captures.length === 0}
-          <p class="empty">No related items.</p>
+    <div class="board-section positions-section">
+      <div class="section-label">SAVED POSITIONS</div>
+      <div class="recent-list positions-list">
+        {#if savedPositionCaptures().length === 0}
+          <p class="empty">No saved positions for this page.</p>
         {:else}
-          {#each captures.slice(0, 3) as capture}
-            <div class="related-item">
-              <button class="related-btn list-btn" disabled={busy} onclick={() => openCapture(capture)}>
-                {captureTitle(capture)}
+          {#each savedPositionCaptures() as capture}
+            <div class="related-item position-item">
+              <button class="related-btn position-btn" disabled={busy} onclick={() => openCapture(capture)}>
+                <span>{captureTitle(capture)}</span>
+                <strong>{savedPositionMeta(capture)}</strong>
               </button>
               <div class="related-actions">
                 {#if confirmDeleteId === capture.id}
@@ -806,6 +882,7 @@
         {/if}
       </div>
     </div>
+
   </div>
   {/if}
 
@@ -815,6 +892,9 @@
       <button class="utility-btn" disabled={busy} onclick={saveSettings}>Save Settings</button>
       <span class="footer-status">{status}</span>
     {:else}
+      <button class="save-position-btn" disabled={busy} onclick={savePageState}>
+        Save Position
+      </button>
       <button class="add-btn" disabled={busy} onclick={commitCapture}>
         {status === "Ready" ? "Add to Strix ↵" : status}
       </button>
@@ -823,12 +903,22 @@
 </main>
 
 <style>
+  :global(html),
+  :global(body),
+  :global(#app) {
+    width: var(--popup-width);
+    height: 600px;
+    overflow: hidden;
+  }
+
   .board-layout {
     display: flex;
     flex-direction: column;
     padding: 16px 20px;
     background: var(--bg);
-    height: 580px;
+    width: var(--popup-width);
+    height: 600px;
+    overflow: hidden;
     font-family: var(--font-sans);
   }
 
@@ -923,7 +1013,7 @@
     min-height: 0;
     overflow-y: auto;
     padding-right: 4px;
-    padding-bottom: 8px;
+    padding-bottom: 14px;
     scrollbar-color: var(--border-focus) transparent;
     scrollbar-width: thin;
   }
@@ -1246,9 +1336,8 @@
     flex: 1;
   }
 
-  .related-section {
-    gap: 10px;
-    min-height: 0;
+  .positions-section {
+    gap: 8px;
   }
 
   .recent-list {
@@ -1275,16 +1364,6 @@
 
   .related-item:hover {
     background: rgba(255, 255, 255, 0.05);
-  }
-
-  .list-btn {
-    flex: 1;
-    text-align: left;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    padding: 2px 0;
-    font-size: 12px;
   }
 
   .related-actions {
@@ -1348,12 +1427,14 @@
     justify-content: flex-end;
     align-items: center;
     gap: 16px;
-    margin-top: 10px;
-    padding-top: 16px;
+    flex: 0 0 auto;
+    margin-top: 8px;
+    padding-top: 10px;
     border-top: 1px solid var(--border);
   }
 
   .add-btn,
+  .save-position-btn,
   .footer-status {
     background: transparent;
     border: none;
@@ -1377,6 +1458,45 @@
 
   .add-btn:hover:not(:disabled) {
     color: var(--accent-cream);
+  }
+
+  .positions-list {
+    max-height: 96px;
+  }
+
+  .position-btn {
+    min-width: 0;
+    flex: 1;
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
+    overflow: hidden;
+    padding: 3px 0;
+    text-align: left;
+  }
+
+  .position-btn span,
+  .position-btn strong {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .position-btn strong {
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 500;
+  }
+
+  .save-position-btn:hover:not(:disabled) {
+    color: var(--accent-cream);
+  }
+
+  .save-position-btn {
+    margin-right: auto;
   }
 
   button:disabled {

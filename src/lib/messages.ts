@@ -9,6 +9,7 @@ import type {
 export type ContentExtractKind =
   | "smart"
   | "page"
+  | "page-state"
   | "selection"
   | "bookmark"
   | "highlight"
@@ -29,8 +30,10 @@ export type ContentMessage =
     }
   | {
       type: "strix:restore-context";
+      scrollX?: number;
       scrollY?: number;
       textQuote?: string;
+      formState?: CaptureRecord["context"]["formState"];
     };
 
 export type BackgroundMessage =

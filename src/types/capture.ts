@@ -1,5 +1,6 @@
 export type CaptureKind =
   | "page"
+  | "page-state"
   | "selection"
   | "bookmark"
   | "image"
@@ -32,6 +33,7 @@ export type CaptureContent = {
 };
 
 export type CaptureContext = {
+  scrollX?: number;
   scrollY?: number;
   textQuote?: string;
   textFragment?: string;
@@ -49,6 +51,22 @@ export type CaptureContext = {
     durationSeconds?: number;
     transcriptText?: string;
   };
+  formState?: {
+    url: string;
+    title?: string;
+    savedAt: string;
+    fields: PageFormFieldState[];
+  };
+};
+
+export type PageFormFieldState = {
+  selector: string;
+  tagName: string;
+  type?: string;
+  name?: string;
+  value?: string;
+  checked?: boolean;
+  selectedValues?: string[];
 };
 
 export type CaptureDestination = {

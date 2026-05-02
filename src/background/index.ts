@@ -11,10 +11,13 @@ import {
   listCapturesForPage
 } from "../lib/storage";
 import { syncCaptures } from "../lib/strixApi";
-import type { CaptureDraft } from "../types/capture";
+import type { CaptureContext, CaptureDraft } from "../types/capture";
 
 const IMAGE_MENU_ID = "strix-save-image";
-const pendingRestores = new Map<number, { scrollY?: number; textQuote?: string }>();
+const pendingRestores = new Map<
+  number,
+  Pick<CaptureContext, "scrollX" | "scrollY" | "textQuote" | "formState">
+>();
 
 browser.runtime.onInstalled.addListener(async () => {
   await browser.contextMenus.removeAll();
@@ -108,16 +111,27 @@ async function openCapture(captureId: string): Promise<void> {
     throw new Error("Capture not found.");
   }
 
-  const url = urlWithTextFragment(
-    capture.source.url,
-    capture.context.textFragment ?? capture.context.textQuote
-  );
+  const url =
+    capture.kind === "page-state"
+      ? capture.source.url
+      : urlWithTextFragment(
+          capture.source.url,
+          capture.context.textFragment ?? capture.context.textQuote
+        );
   const tab = await browser.tabs.create({ url });
 
-  if (tab.id && (capture.context.scrollY !== undefined || capture.context.textQuote)) {
+  if (
+    tab.id &&
+    (capture.context.scrollX !== undefined ||
+      capture.context.scrollY !== undefined ||
+      capture.context.textQuote ||
+      capture.context.formState)
+  ) {
     pendingRestores.set(tab.id, {
+      scrollX: capture.context.scrollX,
       scrollY: capture.context.scrollY,
-      textQuote: capture.context.textQuote
+      textQuote: capture.context.textQuote,
+      formState: capture.context.formState
     });
   }
 }

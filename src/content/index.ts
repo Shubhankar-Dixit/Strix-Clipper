@@ -10,7 +10,8 @@ import type {
   CaptureDraft,
   CaptureRecord,
   CaptureSource,
-  CaptureContext
+  CaptureContext,
+  PageFormFieldState
 } from "../types/capture";
 
 const turndown = new TurndownService({
@@ -125,6 +126,113 @@ function getPageKey(source = getSource()): string {
 
 function textFragment(text?: string): string | undefined {
   return text?.trim() || undefined;
+}
+
+function cssEscape(value: string): string {
+  const css = (globalThis as typeof globalThis & { CSS?: { escape?: (input: string) => string } }).CSS;
+  return css?.escape ? css.escape(value) : value.replace(/["\\]/g, "\\$&");
+}
+
+function selectorForElement(element: Element): string {
+  if (element.id) {
+    return `#${cssEscape(element.id)}`;
+  }
+
+  const parts: string[] = [];
+  let current: Element | null = element;
+
+  while (current && current !== document.documentElement && parts.length < 5) {
+    const tag = current.tagName.toLowerCase();
+    const parent: Element | null = current.parentElement;
+    if (!parent) {
+      parts.unshift(tag);
+      break;
+    }
+
+    const currentTagName = current.tagName;
+    const sameTagSiblings = [...parent.children].filter((child) => child.tagName === currentTagName);
+    const index = sameTagSiblings.indexOf(current) + 1;
+    parts.unshift(sameTagSiblings.length > 1 ? `${tag}:nth-of-type(${index})` : tag);
+    current = parent;
+  }
+
+  return parts.join(" > ");
+}
+
+function captureFormState(source = getSource()): NonNullable<CaptureContext["formState"]> {
+  const fields: PageFormFieldState[] = [];
+  const elements = document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLElement>(
+    "input, textarea, select, [contenteditable]:not([contenteditable='false'])"
+  );
+
+  elements.forEach((element) => {
+    if (
+      !(element instanceof HTMLElement) ||
+      (element instanceof HTMLInputElement && element.disabled) ||
+      (element instanceof HTMLTextAreaElement && element.disabled) ||
+      (element instanceof HTMLSelectElement && element.disabled) ||
+      element.closest(`#${TOOLBAR_ID}`)
+    ) {
+      return;
+    }
+
+    const selector = selectorForElement(element);
+    if (!selector) {
+      return;
+    }
+
+    if (element instanceof HTMLInputElement) {
+      if (["button", "file", "hidden", "image", "password", "reset", "submit"].includes(element.type)) {
+        return;
+      }
+
+      fields.push({
+        selector,
+        tagName: "input",
+        type: element.type,
+        name: element.name || undefined,
+        value: element.value,
+        checked: ["checkbox", "radio"].includes(element.type) ? element.checked : undefined
+      });
+      return;
+    }
+
+    if (element instanceof HTMLTextAreaElement) {
+      fields.push({
+        selector,
+        tagName: "textarea",
+        name: element.name || undefined,
+        value: element.value
+      });
+      return;
+    }
+
+    if (element instanceof HTMLSelectElement) {
+      fields.push({
+        selector,
+        tagName: "select",
+        name: element.name || undefined,
+        value: element.value,
+        selectedValues: [...element.selectedOptions].map((option) => option.value)
+      });
+      return;
+    }
+
+    if (element.isContentEditable) {
+      fields.push({
+        selector,
+        tagName: element.tagName.toLowerCase(),
+        value: element.innerHTML
+      });
+    }
+  });
+
+  return {
+    url: source.url,
+    title: source.title,
+    savedAt: new Date().toISOString(),
+    fields
+  };
 }
 
 function destination(target?: CaptureDestinationTarget) {
@@ -453,6 +561,32 @@ function extractDraft(message: Extract<ContentMessage, { type: "strix:extract" }
     };
   }
 
+  if (message.kind === "page-state") {
+    const article = extractArticle();
+    const formState = captureFormState(source);
+    const fieldCount = formState.fields.length;
+
+    return {
+      kind: "page-state",
+      source,
+      content: {
+        ...article,
+        selectionText,
+        excerpt: `${fieldCount} entr${fieldCount === 1 ? "y" : "ies"} saved at this page position.`
+      },
+      context: {
+        scrollX: window.scrollX,
+        scrollY: window.scrollY,
+        textQuote: selectionText,
+        textFragment: textFragment(selectionText),
+        pageKey: getPageKey(source),
+        viewport: getViewport(),
+        formState
+      },
+      destination: destination(message.defaultDestination)
+    };
+  }
+
   const article = extractArticle();
   return {
     kind: "page",
@@ -462,6 +596,7 @@ function extractDraft(message: Extract<ContentMessage, { type: "strix:extract" }
       selectionText
     },
     context: {
+      scrollX: window.scrollX,
       scrollY: window.scrollY,
       textQuote: selectionText,
       textFragment: textFragment(selectionText),
@@ -488,7 +623,7 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
   }
 
   if (request.type === "strix:restore-context") {
-    restoreContext(request.textQuote, request.scrollY);
+    restoreContext(request.textQuote, request.scrollY, request.scrollX, request.formState);
     sendResponse({ success: true });
     return false;
   }
@@ -790,8 +925,101 @@ function wrapFirstTextMatch(quote: string, captureId: string): boolean {
   }
 }
 
-function restoreContext(textQuote?: string, scrollY?: number): void {
+function restoreFormState(formState?: CaptureContext["formState"]): void {
+  if (!formState) {
+    return;
+  }
+
+  for (const field of formState.fields) {
+    const element = document.querySelector(field.selector);
+    if (!element) {
+      continue;
+    }
+
+    if (element instanceof HTMLInputElement) {
+      if (field.checked !== undefined) {
+        setNativeInputChecked(element, field.checked);
+      }
+      if (field.value !== undefined && element.type !== "checkbox" && element.type !== "radio") {
+        setNativeInputValue(element, field.value);
+      }
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+      continue;
+    }
+
+    if (element instanceof HTMLTextAreaElement && field.value !== undefined) {
+      setNativeTextAreaValue(element, field.value);
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+      continue;
+    }
+
+    if (element instanceof HTMLSelectElement) {
+      const selectedValues = new Set(field.selectedValues ?? (field.value ? [field.value] : []));
+      [...element.options].forEach((option) => {
+        option.selected = selectedValues.has(option.value);
+      });
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+      continue;
+    }
+
+    if (element instanceof HTMLElement && element.isContentEditable && field.value !== undefined) {
+      element.innerHTML = field.value;
+      element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+    }
+  }
+}
+
+function setNativeInputValue(element: HTMLInputElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  if (setter) {
+    setter.call(element, value);
+  } else {
+    element.value = value;
+  }
+}
+
+function setNativeInputChecked(element: HTMLInputElement, checked: boolean): void {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "checked")?.set;
+  if (setter) {
+    setter.call(element, checked);
+  } else {
+    element.checked = checked;
+  }
+}
+
+function setNativeTextAreaValue(element: HTMLTextAreaElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+  if (setter) {
+    setter.call(element, value);
+  } else {
+    element.value = value;
+  }
+}
+
+function restoreScrollPosition(scrollY?: number, scrollX?: number): void {
+  if (scrollY === undefined && scrollX === undefined) {
+    return;
+  }
+
+  window.scrollTo({
+    left: scrollX ?? window.scrollX,
+    top: scrollY ?? window.scrollY,
+    behavior: "smooth"
+  });
+}
+
+function restoreContext(
+  textQuote?: string,
+  scrollY?: number,
+  scrollX?: number,
+  formState?: CaptureContext["formState"]
+): void {
   window.setTimeout(() => {
+    restoreFormState(formState);
+
     if (textQuote) {
       const restored = [...document.querySelectorAll<HTMLElement>(`.${HIGHLIGHT_CLASS}`)]
         .find((element) => element.textContent?.trim() === textQuote.trim());
@@ -801,10 +1029,19 @@ function restoreContext(textQuote?: string, scrollY?: number): void {
       }
     }
 
-    if (scrollY !== undefined) {
-      window.scrollTo({ top: scrollY, behavior: "smooth" });
-    }
+    restoreScrollPosition(scrollY, scrollX);
   }, 200);
+
+  if (formState) {
+    window.setTimeout(() => {
+      restoreFormState(formState);
+      restoreScrollPosition(scrollY, scrollX);
+    }, 750);
+    window.setTimeout(() => {
+      restoreFormState(formState);
+      restoreScrollPosition(scrollY, scrollX);
+    }, 1500);
+  }
 }
 
 document.addEventListener("mouseup", (event) => {
