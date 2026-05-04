@@ -209,11 +209,11 @@
   async function extract(kind: ContentExtractKind): Promise<CaptureDraft> {
     const tab = await activeTab();
     try {
-      return (await browser.tabs.sendMessage(tab.id, {
+      return await sendContentMessage<CaptureDraft>(tab.id, {
         type: "strix:extract",
         kind,
         defaultDestination: settings.defaultDestination
-      })) as CaptureDraft;
+      });
     } catch {
       const capturedAt = new Date().toISOString();
       const fallbackKind: CaptureDraft["kind"] = kind === "smart" ? "page" : kind;
@@ -906,9 +906,18 @@
   :global(html),
   :global(body),
   :global(#app) {
-    width: var(--popup-width);
-    height: 600px;
-    overflow: hidden;
+    width: var(--popup-width) !important;
+    max-width: var(--popup-width) !important;
+    height: 600px !important;
+    max-height: 600px !important;
+    overflow: hidden !important;
+    scrollbar-width: none;
+    overscroll-behavior: none;
+  }
+
+  :global(html::-webkit-scrollbar),
+  :global(body::-webkit-scrollbar) {
+    display: none;
   }
 
   .board-layout {

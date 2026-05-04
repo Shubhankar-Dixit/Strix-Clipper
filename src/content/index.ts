@@ -2,6 +2,7 @@ import { Readability } from "@mozilla/readability";
 import TurndownService from "turndown";
 import type {
   ContentMessage,
+  ContentExtractKind,
   CreateCaptureResponse,
   ListCapturesResponse
 } from "../lib/messages";
@@ -22,12 +23,37 @@ const TOOLBAR_ID = "strix-highlight-toolbar";
 const HIGHLIGHT_CLASS = "strix-restored-highlight";
 const HIGHLIGHT_STYLE_ID = "strix-highlight-style";
 const HIGHLIGHT_MODE_CLASS = "strix-highlight-mode-active";
+const MAX_FALLBACK_TEXT_LENGTH = 90_000;
+const MAX_MARKDOWN_LENGTH = 180_000;
+const MIN_FALLBACK_TEXT_LENGTH = 280;
+const READABILITY_OPTIONS = {
+  charThreshold: 280,
+  nbTopCandidates: 8,
+  maxElemsToParse: 0,
+  keepClasses: false,
+  linkDensityModifier: -0.05
+};
+
+type ExtractedArticle = {
+  text?: string;
+  markdown?: string;
+  html?: string;
+  excerpt?: string;
+  imageUrls?: string[];
+};
+
+type SiteExtractor = {
+  matches: (host: string) => boolean;
+  extract: (source: CaptureSource) => ExtractedArticle | undefined;
+};
 
 let pageHighlights: CaptureRecord[] = [];
 let highlightModeActive = false;
 let highlightFocusIndex = 0;
 let autoHighlightInFlight = false;
 let autoHighlightTimer: number | undefined;
+let jsonLdCache: Record<string, string[]> | undefined;
+let jsonLdDataCache: unknown[] | undefined;
 
 function sendRuntimeMessage<T>(message: unknown): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -47,6 +73,85 @@ function meta(selector: string): string | undefined {
   return document.querySelector<HTMLMetaElement>(selector)?.content?.trim() || undefined;
 }
 
+function firstText(selectors: string[]): string | undefined {
+  for (const selector of selectors) {
+    const text = document.querySelector<HTMLElement>(selector)?.textContent?.trim();
+    if (text) {
+      return normalizeWhitespace(text);
+    }
+  }
+
+  return undefined;
+}
+
+function jsonLdValues(key: string): string[] {
+  if (jsonLdCache?.[key]) {
+    return jsonLdCache[key];
+  }
+
+  jsonLdCache ??= {};
+  const values: string[] = [];
+
+  for (const parsed of jsonLdData()) {
+    collectJsonLdValues(parsed, key, values);
+  }
+
+  jsonLdCache[key] = values.map((value) => value.trim()).filter(Boolean);
+  return jsonLdCache[key];
+}
+
+function jsonLdData(): unknown[] {
+  if (jsonLdDataCache) {
+    return jsonLdDataCache;
+  }
+
+  jsonLdDataCache = [];
+
+  for (const script of document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json"]')) {
+    const raw = script.textContent?.trim();
+    if (!raw) {
+      continue;
+    }
+
+    try {
+      jsonLdDataCache.push(JSON.parse(raw) as unknown);
+    } catch {
+      continue;
+    }
+  }
+
+  return jsonLdDataCache;
+}
+
+function collectJsonLdValues(input: unknown, key: string, values: string[]): void {
+  if (!input) {
+    return;
+  }
+
+  if (Array.isArray(input)) {
+    input.forEach((item) => collectJsonLdValues(item, key, values));
+    return;
+  }
+
+  if (typeof input !== "object") {
+    return;
+  }
+
+  const record = input as Record<string, unknown>;
+  const value = record[key];
+  if (typeof value === "string") {
+    values.push(value);
+  } else if (value && typeof value === "object") {
+    const nested = value as Record<string, unknown>;
+    const name = nested.name;
+    if (typeof name === "string") {
+      values.push(name);
+    }
+  }
+
+  Object.values(record).forEach((item) => collectJsonLdValues(item, key, values));
+}
+
 function getCanonicalUrl(): string | undefined {
   return document.querySelector<HTMLLinkElement>('link[rel="canonical"]')?.href;
 }
@@ -62,11 +167,15 @@ function getFaviconUrl(): string | undefined {
 
 function getSource(): CaptureSource {
   const capturedAt = new Date().toISOString();
+  const jsonTitle = jsonLdValues("headline")[0] ?? jsonLdValues("name")[0];
+  const jsonAuthor = jsonLdValues("author")[0];
+  const jsonPublished = jsonLdValues("datePublished")[0];
 
   return {
     url: location.href,
     canonicalUrl: getCanonicalUrl(),
     title:
+      jsonTitle ??
       meta('meta[property="og:title"]') ??
       meta('meta[name="twitter:title"]') ??
       document.title,
@@ -74,10 +183,12 @@ function getSource(): CaptureSource {
     author:
       meta('meta[name="author"]') ??
       meta('meta[property="article:author"]') ??
+      jsonAuthor ??
       undefined,
     publishedAt:
       meta('meta[property="article:published_time"]') ??
       meta('meta[name="date"]') ??
+      jsonPublished ??
       undefined,
     faviconUrl: getFaviconUrl(),
     capturedAt
@@ -91,29 +202,394 @@ function getViewport() {
   };
 }
 
-function extractArticle() {
-  const clone = document.cloneNode(true) as Document;
-  const article = new Readability(clone).parse();
+function normalizeWhitespace(text: string): string {
+  return text.replace(/\u00a0/g, " ").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").trim();
+}
+
+function truncate(value: string | undefined, maxLength: number): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  return value.length > maxLength ? `${value.slice(0, maxLength).trimEnd()}\n\n[Content truncated]` : value;
+}
+
+function pageDescription(): string | undefined {
+  return (
+    meta('meta[name="description"]') ??
+    meta('meta[property="og:description"]') ??
+    jsonLdValues("description")[0]
+  );
+}
+
+function cleanClone(root: ParentNode = document): DocumentFragment {
+  const fragment = document.createDocumentFragment();
+  const clone = root instanceof Document ? root.body?.cloneNode(true) : (root as Element).cloneNode(true);
+
+  if (clone) {
+    fragment.append(clone);
+  }
+
+  for (const element of [...fragment.querySelectorAll<HTMLElement>([
+    "script",
+    "style",
+    "noscript",
+    "template",
+    "iframe",
+    "svg",
+    "canvas",
+    "video",
+    "audio",
+    "form",
+    "button",
+    "input",
+    "textarea",
+    "select",
+    "nav",
+    "footer",
+    "aside",
+    "[hidden]",
+    "[aria-hidden='true']",
+    "[role='navigation']",
+    "[role='banner']",
+    "[role='complementary']",
+    "[role='dialog']",
+    "[data-testid='placementTracking']",
+    ".advertisement",
+    ".ads",
+    ".ad",
+    ".cookie",
+    ".newsletter",
+    ".subscribe",
+    ".share",
+    ".social",
+    ".sidebar",
+    ".comments"
+  ].join(","))]) {
+    element.remove();
+  }
+
+  return fragment;
+}
+
+function nodeToArticle(root: ParentNode, excerpt = pageDescription()): ExtractedArticle | undefined {
+  const fragment = cleanClone(root);
+  const wrapper = document.createElement("article");
+  wrapper.append(fragment);
+  const text = normalizeWhitespace(wrapper.innerText || wrapper.textContent || "");
+
+  if (text.length < 40) {
+    return undefined;
+  }
+
+  const html = wrapper.innerHTML;
+  return {
+    text: truncate(text, MAX_FALLBACK_TEXT_LENGTH),
+    markdown: truncate(turndown.turndown(html), MAX_MARKDOWN_LENGTH),
+    html,
+    excerpt: excerpt ?? text.slice(0, 280),
+    imageUrls: extractImageUrls(wrapper)
+  };
+}
+
+function extractImageUrls(root: ParentNode = document): string[] | undefined {
+  const urls = new Set<string>();
+
+  root.querySelectorAll<HTMLImageElement>("img").forEach((image) => {
+    const source =
+      image.currentSrc ||
+      image.src ||
+      image.getAttribute("data-src") ||
+      image.getAttribute("data-original");
+
+    if (source && !source.startsWith("data:")) {
+      urls.add(new URL(source, location.href).href);
+    }
+  });
+
+  return urls.size ? [...urls].slice(0, 12) : undefined;
+}
+
+function documentFromFragment(fragment: DocumentFragment): Document {
+  const doc = document.implementation.createHTMLDocument(document.title);
+  doc.body.append(fragment);
+  return doc;
+}
+
+function extractReadability(): ExtractedArticle | undefined {
+  const article = new Readability(documentFromFragment(cleanClone(document)), READABILITY_OPTIONS).parse();
 
   if (!article) {
-    return {
-      text: document.body?.innerText?.trim(),
-      markdown: undefined,
-      html: undefined,
-      excerpt: meta('meta[name="description"]') ?? meta('meta[property="og:description"]')
-    };
+    return undefined;
+  }
+
+  const content = article.content || "";
+  return {
+    text: truncate(normalizeWhitespace(article.textContent || ""), MAX_FALLBACK_TEXT_LENGTH),
+    markdown: content ? truncate(turndown.turndown(content), MAX_MARKDOWN_LENGTH) : undefined,
+    html: content || undefined,
+    excerpt:
+      article.excerpt ??
+      pageDescription(),
+    imageUrls: content ? extractImageUrls(documentFromFragment(document.createRange().createContextualFragment(content))) : extractImageUrls()
+  };
+}
+
+function elementScore(element: HTMLElement): number {
+  const text = normalizeWhitespace(element.innerText || "");
+  const textLength = text.length;
+  if (textLength < MIN_FALLBACK_TEXT_LENGTH) {
+    return 0;
+  }
+
+  const linkTextLength = [...element.querySelectorAll<HTMLAnchorElement>("a")]
+    .reduce((sum, link) => sum + normalizeWhitespace(link.innerText || "").length, 0);
+  const linkDensity = linkTextLength / Math.max(textLength, 1);
+  const paragraphCount = element.querySelectorAll("p, li, pre, blockquote, h1, h2, h3").length;
+  const mediaBonus = Math.min(element.querySelectorAll("img, video, table").length, 8) * 30;
+  const roleBonus = /^(ARTICLE|MAIN)$/.test(element.tagName) ? 500 : 0;
+
+  return textLength * (1 - Math.min(linkDensity, 0.9)) + paragraphCount * 120 + mediaBonus + roleBonus;
+}
+
+function rootContentScore(element: HTMLElement): number {
+  const text = normalizeWhitespace(element.innerText || element.textContent || "");
+  const textLength = text.length;
+  if (textLength < 40) {
+    return 0;
+  }
+
+  const linkTextLength = [...element.querySelectorAll<HTMLAnchorElement>("a")]
+    .reduce((sum, link) => sum + normalizeWhitespace(link.innerText || link.textContent || "").length, 0);
+  const linkDensity = linkTextLength / Math.max(textLength, 1);
+  const paragraphCount = element.querySelectorAll("p, li, pre, blockquote").length;
+  const headingCount = element.querySelectorAll("h1, h2, h3").length;
+  const embedCount = element.querySelectorAll("iframe, video, audio, embed, object, [class*='embed'], [data-testid*='embed']").length;
+  const articleBonus = element.matches("article, main, [role='main'], .available-content, .post-content, .body")
+    ? 500
+    : 0;
+
+  return textLength * (1 - Math.min(linkDensity, 0.95)) + paragraphCount * 160 + headingCount * 90 + articleBonus - embedCount * 260;
+}
+
+function extractDensityFallback(): ExtractedArticle | undefined {
+  const candidates = [...document.querySelectorAll<HTMLElement>("article, main, [role='main'], section, div")]
+    .filter((element) => !element.closest(`#${TOOLBAR_ID}`));
+
+  const best = candidates
+    .map((element) => ({ element, score: elementScore(element) }))
+    .sort((a, b) => b.score - a.score)[0];
+
+  if (!best || best.score < MIN_FALLBACK_TEXT_LENGTH) {
+    const text = normalizeWhitespace(document.body?.innerText || "");
+    return text
+      ? {
+          text: truncate(text, MAX_FALLBACK_TEXT_LENGTH),
+          excerpt: pageDescription() ?? text.slice(0, 280),
+          imageUrls: extractImageUrls()
+        }
+      : {
+          excerpt: pageDescription()
+        };
+  }
+
+  return nodeToArticle(best.element);
+}
+
+function hostMatches(host: string, domains: string[]): boolean {
+  return domains.some((domain) => host === domain || host.endsWith(`.${domain}`));
+}
+
+function isSubstackHost(host = location.hostname.toLowerCase()): boolean {
+  return hostMatches(host, ["substack.com"]) || host.includes("substack");
+}
+
+function extractionRoot(selectors: string[]): HTMLElement | undefined {
+  const candidates: HTMLElement[] = [];
+
+  for (const selector of selectors) {
+    document.querySelectorAll<HTMLElement>(selector).forEach((element) => {
+      if (!element.closest(`#${TOOLBAR_ID}`)) {
+        candidates.push(element);
+      }
+    });
+  }
+
+  const ranked = candidates
+    .map((element) => ({ element, score: rootContentScore(element) }))
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  return ranked[0]?.element;
+}
+
+function extractYouTubePage(source: CaptureSource): ExtractedArticle | undefined {
+  const title = firstText(["h1.ytd-watch-metadata", "h1.title", "ytd-watch-metadata h1"]);
+  const channel = firstText(["ytd-video-owner-renderer #channel-name", "#owner #channel-name"]);
+  const description = firstText([
+    "ytd-text-inline-expander #description-inline-expander",
+    "#description-inline-expander",
+    "#description"
+  ]);
+  const transcriptSegments = [...document.querySelectorAll<HTMLElement>("ytd-transcript-segment-renderer, ytd-transcript-segment-list-renderer [role='button']")]
+    .map((segment) => normalizeWhitespace(segment.innerText || ""))
+    .filter(Boolean);
+  const transcript = transcriptSegments.length ? transcriptSegments.join("\n") : undefined;
+  const lines = [
+    title ? `# ${title}` : undefined,
+    channel ? `Channel: ${channel}` : undefined,
+    description,
+    transcript ? `## Transcript\n\n${transcript}` : undefined
+  ].filter(Boolean) as string[];
+  const text = normalizeWhitespace(lines.join("\n\n"));
+
+  if (!text) {
+    return undefined;
   }
 
   return {
-    text: article.textContent?.trim() || undefined,
-    markdown: article.content ? turndown.turndown(article.content) : undefined,
-    html: article.content || undefined,
-    excerpt:
-      article.excerpt ??
-      meta('meta[name="description"]') ??
-      meta('meta[property="og:description"]') ??
-      undefined
+    text: truncate(text, MAX_FALLBACK_TEXT_LENGTH),
+    markdown: truncate(text, MAX_MARKDOWN_LENGTH),
+    excerpt: description ?? source.title,
+    imageUrls: extractImageUrls()
   };
+}
+
+function extractXPage(source: CaptureSource): ExtractedArticle | undefined {
+  const articles = [...document.querySelectorAll<HTMLElement>("article")].filter((article) => {
+    const text = normalizeWhitespace(article.innerText || "");
+    return text.length > 20 && !article.closest(`#${TOOLBAR_ID}`);
+  });
+
+  if (!articles.length) {
+    return undefined;
+  }
+
+  const text = normalizeWhitespace(articles.map((article) => article.innerText).join("\n\n---\n\n"));
+  return {
+    text: truncate(text, MAX_FALLBACK_TEXT_LENGTH),
+    markdown: truncate(`${text}\n\nSource: ${location.href}`, MAX_MARKDOWN_LENGTH),
+    excerpt: text.slice(0, 280),
+    imageUrls: extractImageUrls(document),
+    html: articles.map((article) => article.outerHTML).join("\n")
+  };
+}
+
+function extractWikipediaPage(): ExtractedArticle | undefined {
+  const root = extractionRoot(["#mw-content-text .mw-parser-output", "main"]);
+  if (!root) {
+    return undefined;
+  }
+
+  const clone = root.cloneNode(true) as HTMLElement;
+  clone.querySelectorAll([
+    ".navbox",
+    ".metadata",
+    ".ambox",
+    ".infobox",
+    ".mw-editsection",
+    ".reference",
+    ".reflist",
+    ".hatnote",
+    ".shortdescription",
+    "#toc"
+  ].join(",")).forEach((element) => element.remove());
+
+  return nodeToArticle(clone);
+}
+
+function extractSubstackPage(): ExtractedArticle | undefined {
+  const root = extractionRoot([
+    "article .available-content",
+    "article .post-content",
+    "article .body",
+    ".available-content",
+    ".post-content",
+    ".post-body",
+    ".single-post",
+    ".note-content",
+    "[data-testid='post-content']",
+    "[data-testid='note-content']",
+    "article",
+    "[role='article']",
+    ".body",
+    "main"
+  ]);
+
+  return root ? nodeToArticle(root) : undefined;
+}
+
+function extractPopularPage(): ExtractedArticle | undefined {
+  const root = extractionRoot([
+    "article",
+    "main article",
+    "main [data-testid='post-container']",
+    "[role='main'] article",
+    ".markdown-body",
+    "#readme",
+    ".repository-content",
+    ".Box-body",
+    ".post",
+    ".available-content",
+    ".post-content",
+    ".entry-content",
+    ".article-content",
+    ".content",
+    "main"
+  ]);
+
+  return root ? nodeToArticle(root) : undefined;
+}
+
+const siteExtractors: SiteExtractor[] = [
+  {
+    matches: (host) => hostMatches(host, ["youtube.com", "youtu.be"]),
+    extract: extractYouTubePage
+  },
+  {
+    matches: (host) => hostMatches(host, ["x.com", "twitter.com"]),
+    extract: extractXPage
+  },
+  {
+    matches: (host) => hostMatches(host, ["wikipedia.org"]),
+    extract: extractWikipediaPage
+  },
+  {
+    matches: isSubstackHost,
+    extract: extractSubstackPage
+  },
+  {
+    matches: (host) => hostMatches(host, ["github.com", "reddit.com", "medium.com", "docs.github.com", "developer.mozilla.org", "stackoverflow.com"]),
+    extract: extractPopularPage
+  }
+];
+
+function extractArticle(source = getSource()): ExtractedArticle {
+  const host = location.hostname.toLowerCase();
+  const siteSpecific = safeArticleExtraction(() =>
+    siteExtractors.find((extractor) => extractor.matches(host))?.extract(source)
+  );
+  const readability = safeArticleExtraction(extractReadability);
+  const fallback = !readability || (readability.text?.length ?? 0) < MIN_FALLBACK_TEXT_LENGTH
+    ? safeArticleExtraction(extractDensityFallback)
+    : undefined;
+  const best = siteSpecific ?? readability ?? fallback;
+
+  return {
+    text: best?.text ?? fallback?.text,
+    markdown: best?.markdown ?? fallback?.markdown,
+    html: best?.html ?? readability?.html,
+    excerpt: best?.excerpt ?? pageDescription(),
+    imageUrls: best?.imageUrls ?? readability?.imageUrls ?? fallback?.imageUrls
+  };
+}
+
+function safeArticleExtraction(extractor: () => ExtractedArticle | undefined): ExtractedArticle | undefined {
+  try {
+    return extractor();
+  } catch {
+    return undefined;
+  }
 }
 
 function selectedText(): string | undefined {
@@ -291,9 +767,91 @@ function activeVideoElement(): HTMLVideoElement | undefined {
   return videos.find((video) => !video.paused && video.currentTime > 0) ?? videos[0];
 }
 
+function isPrimaryVideoHost(): boolean {
+  const host = location.hostname.toLowerCase();
+  return hostMatches(host, ["youtube.com", "youtu.be", "vimeo.com", "x.com", "twitter.com"]);
+}
+
+function hasArticleLikeMainContent(): boolean {
+  const root = extractionRoot([
+    "article .available-content",
+    "article .post-content",
+    "article .body",
+    "article",
+    "main",
+    "[role='main']"
+  ]);
+  const text = normalizeWhitespace(root?.innerText || root?.textContent || "");
+  const paragraphCount = root?.querySelectorAll("p, li, blockquote, pre").length ?? 0;
+
+  return text.length >= 700 && paragraphCount >= 2;
+}
+
+function hasSubstackArticleContent(): boolean {
+  if (!isSubstackHost()) {
+    return false;
+  }
+
+  const root = extractionRoot([
+    "article .available-content",
+    "article .post-content",
+    "article .body",
+    ".available-content",
+    ".post-content",
+    ".post-body",
+    ".single-post",
+    ".note-content",
+    "[data-testid='post-content']",
+    "[data-testid='note-content']",
+    "article",
+    "[role='article']",
+    "main"
+  ]);
+  const text = normalizeWhitespace(root?.innerText || root?.textContent || "");
+  const paragraphCount = root?.querySelectorAll("p, li, blockquote, pre").length ?? 0;
+
+  return text.length >= 700 && paragraphCount >= 2;
+}
+
+function shouldWaitForArticleContent(kind: ContentExtractKind): boolean {
+  return isSubstackHost() && (kind === "smart" || kind === "page" || kind === "page-state");
+}
+
+async function waitForSubstackArticleContent(kind: ContentExtractKind): Promise<void> {
+  if (!shouldWaitForArticleContent(kind) || hasSubstackArticleContent()) {
+    return;
+  }
+
+  const deadline = Date.now() + 1600;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => window.setTimeout(resolve, 120));
+    if (hasSubstackArticleContent()) {
+      return;
+    }
+  }
+}
+
+function isProminentVideo(video: HTMLVideoElement): boolean {
+  const rect = video.getBoundingClientRect();
+  const visibleWidth = Math.min(rect.right, window.innerWidth) - Math.max(rect.left, 0);
+  const visibleHeight = Math.min(rect.bottom, window.innerHeight) - Math.max(rect.top, 0);
+  const visibleArea = Math.max(0, visibleWidth) * Math.max(0, visibleHeight);
+  const viewportArea = Math.max(1, window.innerWidth * window.innerHeight);
+
+  return rect.width >= 360 && rect.height >= 200 && visibleArea / viewportArea >= 0.18;
+}
+
 function hasVideoMoment(): boolean {
   const video = activeVideoElement();
-  return Boolean(video && Number.isFinite(video.currentTime) && video.currentTime > 0);
+  if (!video || !Number.isFinite(video.currentTime) || video.currentTime <= 0) {
+    return false;
+  }
+
+  if (!isPrimaryVideoHost() && hasArticleLikeMainContent()) {
+    return false;
+  }
+
+  return isPrimaryVideoHost() || isProminentVideo(video);
 }
 
 function isThreadLikePage(): boolean {
@@ -562,7 +1120,7 @@ function extractDraft(message: Extract<ContentMessage, { type: "strix:extract" }
   }
 
   if (message.kind === "page-state") {
-    const article = extractArticle();
+    const article = extractArticle(source);
     const formState = captureFormState(source);
     const fieldCount = formState.fields.length;
 
@@ -587,13 +1145,52 @@ function extractDraft(message: Extract<ContentMessage, { type: "strix:extract" }
     };
   }
 
-  const article = extractArticle();
+  const article = extractArticle(source);
   return {
     kind: "page",
     source,
     content: {
       ...article,
       selectionText
+    },
+    context: {
+      scrollX: window.scrollX,
+      scrollY: window.scrollY,
+      textQuote: selectionText,
+      textFragment: textFragment(selectionText),
+      pageKey: getPageKey(source),
+      viewport: getViewport()
+    },
+    destination: destination(message.defaultDestination)
+  };
+}
+
+async function extractDraftAsync(message: Extract<ContentMessage, { type: "strix:extract" }>): Promise<CaptureDraft> {
+  await waitForSubstackArticleContent(message.kind);
+  return extractDraft(message);
+}
+
+function fallbackDraftFromPage(
+  message: Extract<ContentMessage, { type: "strix:extract" }>,
+  source = getSource()
+): CaptureDraft {
+  const selectionText = selectedText();
+  const text = normalizeWhitespace(document.body?.innerText || "");
+  const kind: CaptureDraft["kind"] =
+    message.kind === "smart"
+      ? selectionText
+        ? "selection"
+        : "page"
+      : message.kind;
+
+  return {
+    kind,
+    source,
+    content: {
+      selectionText,
+      text: text || source.title,
+      markdown: text || (source.url ? `[${source.title ?? source.url}](${source.url})` : source.title),
+      excerpt: pageDescription() ?? (text.slice(0, 280) || source.title)
     },
     context: {
       scrollX: window.scrollX,
@@ -632,8 +1229,10 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     return false;
   }
 
-  sendResponse(extractDraft(request));
-  return false;
+  extractDraftAsync(request)
+    .catch(() => fallbackDraftFromPage(request))
+    .then(sendResponse);
+  return true;
 });
 
 function ensureToolbar(): HTMLDivElement {
