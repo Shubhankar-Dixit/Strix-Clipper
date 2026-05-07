@@ -102,6 +102,17 @@
     }
   }
 
+  async function playClipFeedback(kind: CaptureDraft["kind"]) {
+    if (!currentTab?.id) {
+      return;
+    }
+
+    await sendContentMessage(currentTab.id, {
+      type: "strix:play-clip-feedback",
+      kind
+    }).catch(() => undefined);
+  }
+
   function destination(target?: StrixClipperSettings["defaultDestination"]) {
     return target ? { target } : undefined;
   }
@@ -318,6 +329,7 @@
         type: "captures:create",
         draft
       });
+      await playClipFeedback(draft.kind);
       status = `Saved ${response.capture.kind}.`;
       await load();
     } catch (error) {
@@ -336,6 +348,7 @@
         type: "captures:create",
         draft
       });
+      await playClipFeedback(draft.kind);
       const fieldCount = response.capture.context.formState?.fields.length ?? 0;
       status = `Saved position${fieldCount ? ` with ${fieldCount} entries` : ""}.`;
       await load();
@@ -360,6 +373,7 @@
         type: "captures:create",
         draft
       });
+      await playClipFeedback(draft.kind);
       status = `Saved ${response.capture.kind}.`;
       await load();
     } catch (error) {
@@ -399,6 +413,7 @@
         type: "captures:create",
         draft
       });
+      await playClipFeedback(draft.kind);
       await navigator.clipboard.writeText(captureToMarkdown(response.capture));
       status = "Saved and copied Markdown.";
       await load();

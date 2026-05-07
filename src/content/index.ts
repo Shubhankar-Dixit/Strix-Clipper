@@ -23,6 +23,9 @@ const TOOLBAR_ID = "strix-highlight-toolbar";
 const HIGHLIGHT_CLASS = "strix-restored-highlight";
 const HIGHLIGHT_STYLE_ID = "strix-highlight-style";
 const HIGHLIGHT_MODE_CLASS = "strix-highlight-mode-active";
+const CLIP_FEEDBACK_STYLE_ID = "strix-clip-feedback-style";
+const CLIP_FEEDBACK_CLASS = "strix-clip-feedback";
+const HIGHLIGHT_ACTIVE_CLASS = "strix-restored-highlight-active";
 const MAX_FALLBACK_TEXT_LENGTH = 90_000;
 const MAX_MARKDOWN_LENGTH = 180_000;
 const MIN_FALLBACK_TEXT_LENGTH = 280;
@@ -50,6 +53,7 @@ type SiteExtractor = {
 let pageHighlights: CaptureRecord[] = [];
 let highlightModeActive = false;
 let highlightFocusIndex = 0;
+let activeHighlightId: string | undefined;
 let autoHighlightInFlight = false;
 let autoHighlightTimer: number | undefined;
 let jsonLdCache: Record<string, string[]> | undefined;
@@ -1034,14 +1038,19 @@ function jumpToHighlight(): void {
     return;
   }
 
-  const capture = pageHighlights[highlightFocusIndex % pageHighlights.length];
+  const index = highlightFocusIndex % pageHighlights.length;
+  const capture = pageHighlights[index];
   const element = document.querySelector<HTMLElement>(`[data-strix-capture-id="${capture.id}"]`);
 
   if (element) {
+    document.querySelectorAll<HTMLElement>(`.${HIGHLIGHT_ACTIVE_CLASS}`)
+      .forEach((highlight) => highlight.classList.remove(HIGHLIGHT_ACTIVE_CLASS));
+    element.classList.add(HIGHLIGHT_ACTIVE_CLASS);
+    activeHighlightId = capture.id;
     element.scrollIntoView({ block: "center", behavior: "smooth" });
   }
 
-  highlightFocusIndex = (highlightFocusIndex + 1) % pageHighlights.length;
+  highlightFocusIndex = (index + 1) % pageHighlights.length;
 }
 
 function extractDraft(message: Extract<ContentMessage, { type: "strix:extract" }>): CaptureDraft {
@@ -1219,6 +1228,20 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     return false;
   }
 
+  if (request.type === "strix:add-selection-highlight") {
+    activateHighlightMode();
+    saveHighlightFromSelection()
+      .then(() => sendResponse({ success: true }))
+      .catch((error) => sendResponse({ success: false, error: error instanceof Error ? error.message : "Unable to add highlight." }));
+    return true;
+  }
+
+  if (request.type === "strix:play-clip-feedback") {
+    playClipFeedback(request.kind);
+    sendResponse({ success: true });
+    return false;
+  }
+
   if (request.type === "strix:restore-context") {
     restoreContext(request.textQuote, request.scrollY, request.scrollX, request.formState);
     sendResponse({ success: true });
@@ -1247,26 +1270,39 @@ function ensureToolbar(): HTMLDivElement {
     "position:fixed",
     "z-index:2147483647",
     "display:none",
-    "flex-direction:column",
-    "align-items:flex-start",
-    "gap:6px",
-    "padding:0",
-    "border:1px solid rgba(255,255,255,0.12)",
+    "align-items:center",
+    "gap:4px",
+    "padding:4px",
+    "border:1px solid rgba(255,255,255,0.18)",
     "border-radius:999px",
-    "background:linear-gradient(180deg, rgba(34,34,36,0.98), rgba(23,23,26,0.98))",
-    "box-shadow:0 10px 28px rgba(0,0,0,0.35)",
+    "background:rgba(37,37,38,0.96)",
+    "box-shadow:0 8px 22px rgba(0,0,0,0.38)",
     "backdrop-filter:blur(12px)",
     "color:#f4efe7",
     "font:12px/1.2 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif"
   ].join(";");
 
-  const capsule = document.createElement("div");
-  capsule.style.cssText = [
-    "display:flex",
+  const clip = document.createElement("button");
+  clip.type = "button";
+  clip.id = "strix-highlight-clip";
+  clip.textContent = "Clip highlights";
+  clip.style.cssText = [
+    "height:32px",
+    "border:0",
+    "border-radius:999px",
+    "padding:0 12px",
+    "display:inline-flex",
     "align-items:center",
-    "gap:8px",
-    "padding:6px 8px"
+    "justify-content:center",
+    "background:#8b5cf6",
+    "color:#fff",
+    "font:700 14px/1 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif",
+    "white-space:nowrap"
   ].join(";");
+  clip.addEventListener("mousedown", (event) => event.preventDefault());
+  clip.addEventListener("click", () => {
+    clipHighlights().catch(() => undefined);
+  });
 
   const count = document.createElement("button");
   count.type = "button";
@@ -1274,46 +1310,71 @@ function ensureToolbar(): HTMLDivElement {
   count.setAttribute("aria-label", "Jump to highlighted text");
   count.textContent = "0";
   count.style.cssText = [
-    "min-width:24px",
-    "height:24px",
+    "min-width:32px",
+    "height:32px",
     "border:0",
-    "padding:0 8px",
+    "padding:0 10px",
     "border-radius:999px",
     "display:inline-flex",
     "align-items:center",
     "justify-content:center",
-    "background:rgba(255,255,255,0.08)",
-    "color:#dad3c8",
-    "font:600 12px/1 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif"
+    "background:rgba(255,255,255,0.10)",
+    "color:#d7d7d8",
+    "font:700 14px/1 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif"
   ].join(";");
   count.addEventListener("mousedown", (event) => event.preventDefault());
   count.addEventListener("click", () => {
     jumpToHighlight();
   });
 
-  const marker = document.createElement("span");
-  marker.setAttribute("aria-hidden", "true");
-  marker.style.cssText = [
-    "width:14px",
-    "height:14px",
-    "display:inline-block",
-    "background:linear-gradient(135deg, #f1d35f 0 48%, #1f1f22 48% 62%, #f4efe7 62%)",
-    "border-radius:3px",
-    "box-shadow:0 0 0 1px rgba(255,255,255,0.18)"
-  ].join(";");
+  const deleteButton = toolbarIconButton("strix-highlight-delete", "Delete current highlight", "M5 7h14M10 11v6M14 11v6M9 7l1-2h4l1 2M7 7l1 13h8l1-13");
+  deleteButton.addEventListener("click", () => {
+    deleteFocusedHighlight().catch(() => undefined);
+  });
 
-  capsule.append(marker);
-  capsule.append(count);
-  toolbar.append(capsule);
+  const closeButton = toolbarIconButton("strix-highlight-close", "Close highlighter", "M6 6l12 12M18 6L6 18");
+  closeButton.addEventListener("click", () => {
+    deactivateHighlightMode();
+  });
+
+  toolbar.append(clip);
+  toolbar.append(count);
+  toolbar.append(deleteButton);
+  toolbar.append(closeButton);
   document.documentElement.append(toolbar);
   return toolbar;
+}
+
+function toolbarIconButton(id: string, label: string, path: string): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.id = id;
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${path}" /></svg>`;
+  button.style.cssText = [
+    "width:32px",
+    "height:32px",
+    "border:0",
+    "border-radius:999px",
+    "display:inline-flex",
+    "align-items:center",
+    "justify-content:center",
+    "padding:0",
+    "background:rgba(255,255,255,0.08)",
+    "color:#d7d7d8"
+  ].join(";");
+  button.querySelector("svg")?.setAttribute("style", "width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round");
+  button.addEventListener("mousedown", (event) => event.preventDefault());
+  return button;
 }
 
 function updateToolbarPosition(): void {
   const toolbar = ensureToolbar();
   if (highlightModeActive || pageHighlights.length > 0) {
-    toolbar.style.left = `${Math.max(8, window.innerWidth - 84)}px`;
-    toolbar.style.top = "16px";
+    const width = Math.min(320, Math.max(220, toolbar.getBoundingClientRect().width || 280));
+    toolbar.style.left = `${Math.max(8, Math.round((window.innerWidth - width) / 2))}px`;
+    toolbar.style.top = "10px";
     toolbar.style.display = "flex";
     renderToolbarState();
     return;
@@ -1332,7 +1393,7 @@ function hideToolbar(): void {
 async function saveHighlightFromSelection(): Promise<void> {
   const draft = extractDraft({ type: "strix:extract", kind: "highlight" });
   if (!draft.content.selectionText) {
-    hideToolbar();
+    updateToolbarPosition();
     return;
   }
 
@@ -1341,10 +1402,65 @@ async function saveHighlightFromSelection(): Promise<void> {
     draft
   });
 
+  playClipFeedback();
   restoreHighlight(response.capture);
   await refreshPageHighlights();
   window.getSelection()?.removeAllRanges();
   updateToolbarPosition();
+}
+
+async function clipHighlights(): Promise<void> {
+  if (!pageHighlights.length) {
+    updateToolbarPosition();
+    return;
+  }
+
+  const source = getSource();
+  const highlights = pageHighlights
+    .map((capture) => capture.content.selectionText ?? capture.content.text ?? capture.context.textQuote)
+    .map((text) => text?.trim())
+    .filter(Boolean) as string[];
+
+  if (!highlights.length) {
+    return;
+  }
+
+  const markdown = highlights.map((text) => `> ${text.replace(/\n/g, "\n> ")}`).join("\n\n");
+  const draft: CaptureDraft = {
+    kind: "page",
+    source,
+    content: {
+      text: highlights.join("\n\n"),
+      markdown,
+      excerpt: `${highlights.length} highlight${highlights.length === 1 ? "" : "s"} clipped from this page.`
+    },
+    context: {
+      scrollX: window.scrollX,
+      scrollY: window.scrollY,
+      pageKey: getPageKey(source),
+      viewport: getViewport()
+    }
+  };
+
+  await sendRuntimeMessage<CreateCaptureResponse>({
+    type: "captures:create",
+    draft
+  });
+  playClipFeedback("highlight");
+  flashToolbarLabel("Clipped");
+}
+
+function flashToolbarLabel(label: string): void {
+  const button = document.querySelector<HTMLButtonElement>("#strix-highlight-clip");
+  if (!button) {
+    return;
+  }
+
+  const previous = button.textContent ?? "Clip highlights";
+  button.textContent = label;
+  window.setTimeout(() => {
+    button.textContent = previous;
+  }, 1200);
 }
 
 async function refreshPageHighlights(): Promise<void> {
@@ -1358,6 +1474,7 @@ async function refreshPageHighlights(): Promise<void> {
 
   pageHighlights = response.captures.filter((capture) => capture.kind === "highlight");
   highlightFocusIndex = 0;
+  activeHighlightId = undefined;
 
   for (const capture of pageHighlights) {
     restoreHighlight(capture);
@@ -1365,6 +1482,187 @@ async function refreshPageHighlights(): Promise<void> {
 
   renderToolbarState();
   updateToolbarPosition();
+}
+
+function selectionFeedbackRects(): DOMRect[] {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+    return [];
+  }
+
+  const viewportPadding = 8;
+  const rects: DOMRect[] = [];
+
+  for (let index = 0; index < selection.rangeCount; index += 1) {
+    const range = selection.getRangeAt(index);
+    for (const rect of [...range.getClientRects()]) {
+      if (rect.width < 1 || rect.height < 1) {
+        continue;
+      }
+
+      const visibleLeft = Math.max(viewportPadding, rect.left);
+      const visibleTop = Math.max(viewportPadding, rect.top);
+      const visibleRight = Math.min(window.innerWidth - viewportPadding, rect.right);
+      const visibleBottom = Math.min(window.innerHeight - viewportPadding, rect.bottom);
+
+      if (visibleRight <= visibleLeft || visibleBottom <= visibleTop) {
+        continue;
+      }
+
+      rects.push(new DOMRect(visibleLeft, visibleTop, visibleRight - visibleLeft, visibleBottom - visibleTop));
+    }
+  }
+
+  return rects.slice(0, 12);
+}
+
+function clampFeedbackRect(rect: DOMRect, viewportPadding = 8): DOMRect | undefined {
+  const left = Math.max(viewportPadding, rect.left);
+  const top = Math.max(viewportPadding, rect.top);
+  const right = Math.min(window.innerWidth - viewportPadding, rect.right);
+  const bottom = Math.min(window.innerHeight - viewportPadding, rect.bottom);
+
+  if (right <= left || bottom <= top) {
+    return undefined;
+  }
+
+  return new DOMRect(left, top, right - left, bottom - top);
+}
+
+function elementFeedbackRects(): DOMRect[] {
+  const selectors = [
+    "article h1",
+    "main h1",
+    "[role='main'] h1",
+    "h1",
+    "article h2",
+    "main h2",
+    "article p",
+    "main p",
+    "article figure img",
+    "main figure img"
+  ];
+  const rects: DOMRect[] = [];
+  const seen = new Set<Element>();
+  const maxWidth = window.innerWidth * 0.92;
+  const maxHeight = Math.max(72, window.innerHeight * 0.28);
+
+  for (const selector of selectors) {
+    for (const element of [...document.querySelectorAll<HTMLElement>(selector)]) {
+      if (seen.has(element)) {
+        continue;
+      }
+      seen.add(element);
+
+      const text = element.textContent?.trim();
+      if (!(element instanceof HTMLImageElement) && (!text || text.length < 12)) {
+        continue;
+      }
+
+      const rect = clampFeedbackRect(element.getBoundingClientRect(), 8);
+      if (!rect || rect.width < 32 || rect.height < 12 || rect.width > maxWidth || rect.height > maxHeight) {
+        continue;
+      }
+
+      rects.push(rect);
+      if (rects.length >= 4) {
+        return rects;
+      }
+    }
+  }
+
+  return rects;
+}
+
+function fallbackFeedbackRect(): DOMRect {
+  const width = Math.max(160, window.innerWidth - 24);
+  const height = Math.max(120, window.innerHeight - 24);
+  return new DOMRect(
+    12,
+    12,
+    width,
+    height
+  );
+}
+
+function clipFeedbackRects(kind?: CaptureDraft["kind"]): DOMRect[] {
+  const selectionRects = selectionFeedbackRects();
+  if (selectionRects.length > 0) {
+    return selectionRects;
+  }
+
+  if (kind !== "selection" && kind !== "highlight") {
+    const elementRects = elementFeedbackRects();
+    if (elementRects.length > 0) {
+      return elementRects;
+    }
+  }
+
+  return [fallbackFeedbackRect()];
+}
+
+function playClipFeedbackForRects(rects: DOMRect[]): void {
+  ensureClipFeedbackStyles();
+
+  const fragment = document.createDocumentFragment();
+  const outlines: HTMLDivElement[] = [];
+
+  for (const rect of rects) {
+    const outline = document.createElement("div");
+    outline.className = CLIP_FEEDBACK_CLASS;
+    outline.setAttribute("aria-hidden", "true");
+    outline.style.left = `${rect.left}px`;
+    outline.style.top = `${rect.top}px`;
+    outline.style.width = `${rect.width}px`;
+    outline.style.height = `${rect.height}px`;
+    outlines.push(outline);
+    fragment.append(outline);
+  }
+
+  document.documentElement.append(fragment);
+  window.setTimeout(() => outlines.forEach((outline) => outline.remove()), 190);
+}
+
+function playClipFeedback(kind?: CaptureDraft["kind"]): void {
+  playClipFeedbackForRects(clipFeedbackRects(kind));
+}
+
+function ensureClipFeedbackStyles(): void {
+  if (document.getElementById(CLIP_FEEDBACK_STYLE_ID)) {
+    return;
+  }
+
+  const style = document.createElement("style");
+  style.id = CLIP_FEEDBACK_STYLE_ID;
+  style.textContent = `
+    .${CLIP_FEEDBACK_CLASS} {
+      position: fixed;
+      z-index: 2147483647;
+      pointer-events: none;
+      box-sizing: border-box;
+      border: 1px solid rgba(116, 124, 138, 0.82);
+      border-radius: 3px;
+      opacity: 0;
+      transform: scale(1.05);
+      transform-origin: center;
+      animation: strixClipOutline 180ms cubic-bezier(0.2, 0, 0, 1) forwards;
+      contain: layout style paint;
+    }
+
+    @keyframes strixClipOutline {
+      0% { opacity: 0; transform: scale(1.05); }
+      20% { opacity: 0.78; }
+      70% { opacity: 0.78; transform: scale(1); }
+      100% { opacity: 0; transform: scale(1); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .${CLIP_FEEDBACK_CLASS} {
+        animation-duration: 90ms;
+      }
+    }
+  `;
+  document.documentElement.append(style);
 }
 
 function restoreHighlight(capture: CaptureRecord): void {
@@ -1386,10 +1684,37 @@ function renderToolbarState(): void {
     return;
   }
 
+  toolbar.style.display = (highlightModeActive || pageHighlights.length > 0) ? "flex" : "none";
+
   const count = toolbar.querySelector<HTMLButtonElement>("#strix-highlight-count");
   if (count) {
     count.textContent = String(pageHighlights.length);
+    count.disabled = pageHighlights.length === 0;
   }
+
+  const clip = toolbar.querySelector<HTMLButtonElement>("#strix-highlight-clip");
+  if (clip) {
+    clip.disabled = pageHighlights.length === 0;
+    clip.style.opacity = pageHighlights.length === 0 ? "0.56" : "1";
+  }
+
+  const deleteButton = toolbar.querySelector<HTMLButtonElement>("#strix-highlight-delete");
+  if (deleteButton) {
+    deleteButton.disabled = pageHighlights.length === 0;
+    deleteButton.style.opacity = pageHighlights.length === 0 ? "0.45" : "1";
+  }
+}
+
+async function deleteFocusedHighlight(): Promise<void> {
+  if (!pageHighlights.length) {
+    return;
+  }
+
+  const active = activeHighlightId
+    ? pageHighlights.find((highlight) => highlight.id === activeHighlightId)
+    : undefined;
+  const index = Math.max(0, Math.min(highlightFocusIndex, pageHighlights.length - 1));
+  await deleteHighlight(active ?? pageHighlights[index]);
 }
 
 function removeHighlightFromPage(captureId: string): void {
@@ -1437,6 +1762,7 @@ async function deleteHighlight(capture: CaptureRecord): Promise<void> {
 
   removeHighlightFromPage(capture.id);
   pageHighlights = pageHighlights.filter((item) => item.id !== capture.id);
+  activeHighlightId = undefined;
   highlightFocusIndex = 0;
   renderToolbarState();
   updateToolbarPosition();
@@ -1449,6 +1775,13 @@ function activateHighlightMode(): void {
   updateToolbarPosition();
 }
 
+function deactivateHighlightMode(): void {
+  highlightModeActive = false;
+  document.documentElement.classList.remove(HIGHLIGHT_MODE_CLASS);
+  window.getSelection()?.removeAllRanges();
+  updateToolbarPosition();
+}
+
 function ensureHighlightStyles(): void {
   if (document.getElementById(HIGHLIGHT_STYLE_ID)) {
     return;
@@ -1458,18 +1791,24 @@ function ensureHighlightStyles(): void {
   style.id = HIGHLIGHT_STYLE_ID;
   style.textContent = `
     .${HIGHLIGHT_CLASS} {
-      background: rgba(241, 211, 95, 0.34);
-      border-radius: 999px;
-      box-shadow: inset 0 0 0 1px rgba(176, 148, 79, 0.45);
-      padding: 0.05em 0.18em;
+      background: rgba(255, 230, 109, 0.72);
+      border-radius: 2px;
+      box-shadow: inset 0 -0.12em 0 rgba(255, 207, 45, 0.72);
+      padding: 0;
       -webkit-box-decoration-break: clone;
       box-decoration-break: clone;
+    }
+
+    .${HIGHLIGHT_CLASS}:hover,
+    .${HIGHLIGHT_CLASS}.${HIGHLIGHT_ACTIVE_CLASS} {
+      background: rgba(255, 221, 72, 0.86);
+      box-shadow: inset 0 -0.14em 0 rgba(255, 191, 0, 0.84);
     }
 
     .${HIGHLIGHT_MODE_CLASS},
     .${HIGHLIGHT_MODE_CLASS} body,
     .${HIGHLIGHT_MODE_CLASS} body * {
-      cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 28 28'%3E%3Cpath fill='%23f1d35f' d='M5 19 18.8 5.2l4 4L9 23H5z'/%3E%3Cpath fill='%23212124' d='m17.2 6.8 1.6-1.6 4 4-1.6 1.6zM5 19l4 4H5z'/%3E%3Cpath fill='%23f4efe7' d='m9 23 12.2-12.2 1.8 1.8L10.8 24.8z' opacity='.75'/%3E%3C/svg%3E") 5 23, text !important;
+      cursor: text !important;
     }
 
     #${TOOLBAR_ID},
@@ -1481,6 +1820,8 @@ function ensureHighlightStyles(): void {
 }
 
 function wrapFirstTextMatch(quote: string, captureId: string): boolean {
+  const textNodes: Text[] = [];
+  let fullText = "";
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
       const parent = node.parentElement;
@@ -1492,36 +1833,108 @@ function wrapFirstTextMatch(quote: string, captureId: string): boolean {
         return NodeFilter.FILTER_REJECT;
       }
 
-      return node.textContent?.includes(quote)
-        ? NodeFilter.FILTER_ACCEPT
-        : NodeFilter.FILTER_SKIP;
+      return node.textContent ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
     }
   });
 
-  const node = walker.nextNode();
-  if (!node?.textContent) {
+  let node = walker.nextNode();
+  while (node) {
+    textNodes.push(node as Text);
+    fullText += node.textContent ?? "";
+    node = walker.nextNode();
+  }
+
+  const match = textMatchOffsets(fullText, quote);
+  if (!match) {
     return false;
   }
 
-  const index = node.textContent.indexOf(quote);
-  if (index < 0) {
+  const start = textPositionFromGlobalOffset(textNodes, match.start);
+  const end = textPositionFromGlobalOffset(textNodes, match.end);
+  if (!start || !end) {
     return false;
   }
 
   const range = document.createRange();
-  range.setStart(node, index);
-  range.setEnd(node, index + quote.length);
+  range.setStart(start.node, start.offset);
+  range.setEnd(end.node, end.offset);
 
   const mark = document.createElement("span");
   mark.className = HIGHLIGHT_CLASS;
   mark.dataset.strixCaptureId = captureId;
 
   try {
-    range.surroundContents(mark);
+    mark.append(range.extractContents());
+    range.insertNode(mark);
     return true;
   } catch {
     return false;
   }
+}
+
+function textMatchOffsets(fullText: string, quote: string): { start: number; end: number } | undefined {
+  const exactIndex = fullText.indexOf(quote);
+  if (exactIndex >= 0) {
+    return { start: exactIndex, end: exactIndex + quote.length };
+  }
+
+  const normalized = normalizeTextWithOffsets(fullText);
+  const normalizedQuote = normalizeWhitespace(quote);
+  const normalizedIndex = normalized.text.indexOf(normalizedQuote);
+  if (normalizedIndex < 0) {
+    return undefined;
+  }
+
+  const start = normalized.offsets[normalizedIndex];
+  const lastIndex = normalizedIndex + normalizedQuote.length - 1;
+  const end = (normalized.offsets[lastIndex] ?? start) + 1;
+  return { start, end };
+}
+
+function normalizeTextWithOffsets(input: string): { text: string; offsets: number[] } {
+  let text = "";
+  const offsets: number[] = [];
+  let pendingSpaceOffset: number | undefined;
+
+  for (let index = 0; index < input.length; index += 1) {
+    const character = input[index];
+    if (/\s/.test(character)) {
+      pendingSpaceOffset ??= index;
+      continue;
+    }
+
+    if (pendingSpaceOffset !== undefined && text.length > 0) {
+      text += " ";
+      offsets.push(pendingSpaceOffset);
+    }
+
+    text += character;
+    offsets.push(index);
+    pendingSpaceOffset = undefined;
+  }
+
+  return { text, offsets };
+}
+
+function textPositionFromGlobalOffset(
+  nodes: Text[],
+  targetOffset: number
+): { node: Text; offset: number } | undefined {
+  let cursor = 0;
+
+  for (const node of nodes) {
+    const length = node.textContent?.length ?? 0;
+    if (targetOffset <= cursor + length) {
+      return {
+        node,
+        offset: Math.max(0, targetOffset - cursor)
+      };
+    }
+    cursor += length;
+  }
+
+  const last = nodes[nodes.length - 1];
+  return last ? { node: last, offset: last.textContent?.length ?? 0 } : undefined;
 }
 
 function restoreFormState(formState?: CaptureContext["formState"]): void {
@@ -1644,13 +2057,19 @@ function restoreContext(
 }
 
 document.addEventListener("mouseup", (event) => {
-  if ((event.target as Element | null)?.closest(`#${TOOLBAR_ID}`)) {
+  if (event.target instanceof Element && event.target.closest(`#${TOOLBAR_ID}`)) {
     return;
   }
-  window.setTimeout(queueAutoHighlight, 0);
+  window.setTimeout(() => {
+    queueAutoHighlight();
+  }, 0);
 });
-document.addEventListener("keyup", () => window.setTimeout(queueAutoHighlight, 0));
-document.addEventListener("selectionchange", () => window.setTimeout(queueAutoHighlight, 0));
+document.addEventListener("keyup", () => window.setTimeout(() => {
+  queueAutoHighlight();
+}, 0));
+document.addEventListener("selectionchange", () => window.setTimeout(() => {
+  queueAutoHighlight();
+}, 0));
 document.addEventListener("scroll", () => window.setTimeout(updateToolbarPosition, 0), { passive: true });
 
 ensureHighlightStyles();

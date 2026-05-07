@@ -29,6 +29,13 @@ export type ContentMessage =
       type: "strix:refresh-highlights";
     }
   | {
+      type: "strix:add-selection-highlight";
+    }
+  | {
+      type: "strix:play-clip-feedback";
+      kind?: CaptureDraft["kind"];
+    }
+  | {
       type: "strix:restore-context";
       scrollX?: number;
       scrollY?: number;

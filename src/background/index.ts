@@ -14,6 +14,7 @@ import { syncCaptures } from "../lib/strixApi";
 import type { CaptureContext, CaptureDraft } from "../types/capture";
 
 const IMAGE_MENU_ID = "strix-save-image";
+const ADD_HIGHLIGHT_MENU_ID = "strix-add-selection-highlight";
 const pendingRestores = new Map<
   number,
   Pick<CaptureContext, "scrollX" | "scrollY" | "textQuote" | "formState">
@@ -26,9 +27,21 @@ browser.runtime.onInstalled.addListener(async () => {
     title: "Save image to Strix",
     contexts: ["image"]
   });
+  await browser.contextMenus.create({
+    id: ADD_HIGHLIGHT_MENU_ID,
+    title: "Add to highlights",
+    contexts: ["selection"]
+  });
 });
 
 browser.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId === ADD_HIGHLIGHT_MENU_ID) {
+    if (tab?.id) {
+      await sendContentMessage(tab.id, { type: "strix:add-selection-highlight" }).catch(() => undefined);
+    }
+    return;
+  }
+
   if (info.menuItemId !== IMAGE_MENU_ID || !info.srcUrl) {
     return;
   }
@@ -56,6 +69,37 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
 
   await createCapture(draft);
 });
+
+function isMissingContentScriptError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("Receiving end does not exist") || message.includes("Could not establish connection");
+}
+
+async function injectContentScript(tabId: number): Promise<void> {
+  const scriptingBrowser = browser as typeof browser & {
+    scripting?: {
+      executeScript(details: { target: { tabId: number }; files: string[] }): Promise<unknown[]>;
+    };
+  };
+
+  await scriptingBrowser.scripting?.executeScript({
+    target: { tabId },
+    files: ["assets/content.js"]
+  });
+}
+
+async function sendContentMessage(tabId: number, message: unknown): Promise<unknown> {
+  try {
+    return await browser.tabs.sendMessage(tabId, message);
+  } catch (error) {
+    if (!isMissingContentScriptError(error)) {
+      throw error;
+    }
+
+    await injectContentScript(tabId);
+    return browser.tabs.sendMessage(tabId, message);
+  }
+}
 
 browser.runtime.onMessage.addListener((message: unknown) => {
   const request = message as BackgroundMessage;
