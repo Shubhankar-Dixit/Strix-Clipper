@@ -12,6 +12,18 @@ export type CaptureDestinationTarget = "library";
 
 export type SyncStatus = "local" | "pending" | "synced" | "error";
 
+export type DefaultCaptureMode = "smart" | "page" | "selection" | "bookmark";
+
+export type ArticleCleanupMode = "smart" | "reader" | "loose";
+
+export type CaptureExtractionSettings = {
+  defaultCaptureMode: DefaultCaptureMode;
+  articleCleanupMode: ArticleCleanupMode;
+  includeImages: boolean;
+  includeReplies: boolean;
+  preferredLanguage: string;
+};
+
 export type CaptureSource = {
   url: string;
   canonicalUrl?: string;
@@ -103,4 +115,4 @@ export type StrixClipperSettings = {
   apiBaseUrl: string;
   apiToken: string;
   defaultDestination: CaptureDestinationTarget;
-};
+} & CaptureExtractionSettings;

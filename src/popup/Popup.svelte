@@ -9,6 +9,7 @@
     SyncResponse
   } from "../lib/messages";
   import { captureToMarkdown } from "../lib/markdown";
+  import { extractionSettingsFrom } from "../lib/settings";
   import type {
     CaptureDraft,
     CaptureRecord,
@@ -33,7 +34,12 @@
   let settings: StrixClipperSettings = {
     apiBaseUrl: "",
     apiToken: "",
-    defaultDestination: "library"
+    defaultDestination: "library",
+    defaultCaptureMode: "smart",
+    articleCleanupMode: "smart",
+    includeImages: true,
+    includeReplies: false,
+    preferredLanguage: ""
   };
   let status = "Ready";
   let busy = false;
@@ -44,6 +50,11 @@
   let editTitle = "";
   let editUrl = "";
   let editDescription = "";
+  let editSiteName = "";
+  let editAuthor = "";
+  let editPublishedAt = "";
+  let editCapturedAt = "";
+  let editCanonicalUrl = "";
   let confirmDeleteId = "";
   let selectedBox = "Inbox";
   let boxes = ["Inbox", "Moodboard", "Ideas", "Research", "Music"];
@@ -172,6 +183,11 @@
     editTitle = draft.source.title || currentTab?.title || "";
     editUrl = draft.source.url || currentTab?.url || "";
     editDescription = draft.content.excerpt || "";
+    editSiteName = draft.source.siteName || hostname || "";
+    editAuthor = draft.source.author || "";
+    editPublishedAt = draft.source.publishedAt || "";
+    editCapturedAt = draft.source.capturedAt || "";
+    editCanonicalUrl = draft.source.canonicalUrl || "";
     editTimestamp = draft.context.video ? formatTimestamp(draft.context.video.timestampSeconds) : "";
   }
 
@@ -207,12 +223,18 @@
     captures = listResponse.captures;
     stats = statsResponse.stats;
     settings = settingsResponse.settings;
+    captureMode = settings.defaultCaptureMode;
     try {
       pageDraft = await extract(captureMode);
       applyDraftToEditor(pageDraft);
     } catch {
       editTitle = currentTab?.title || "";
       editUrl = currentTab?.url || "";
+      editSiteName = hostname;
+      editAuthor = "";
+      editPublishedAt = "";
+      editCapturedAt = "";
+      editCanonicalUrl = "";
       editTimestamp = "";
     }
   }
@@ -223,7 +245,8 @@
       return await sendContentMessage<CaptureDraft>(tab.id, {
         type: "strix:extract",
         kind,
-        defaultDestination: settings.defaultDestination
+        defaultDestination: settings.defaultDestination,
+        extractionSettings: extractionSettingsFrom(settings)
       });
     } catch {
       const capturedAt = new Date().toISOString();
@@ -267,7 +290,12 @@
       source: {
         ...draft.source,
         title: editTitle.trim() || draft.source.title,
-        url: sourceUrl
+        url: sourceUrl,
+        canonicalUrl: editCanonicalUrl.trim() || draft.source.canonicalUrl,
+        siteName: editSiteName.trim() || draft.source.siteName,
+        author: editAuthor.trim() || draft.source.author,
+        publishedAt: editPublishedAt.trim() || draft.source.publishedAt,
+        capturedAt: editCapturedAt.trim() || draft.source.capturedAt
       },
       content: {
         ...draft.content,
@@ -506,6 +534,10 @@
     status = "Clearing...";
     try {
       await sendMessage({ type: "captures:clear" });
+      captures = [];
+      if (currentTab?.id) {
+        await sendContentMessage(currentTab.id, { type: "strix:refresh-highlights" }).catch(() => undefined);
+      }
       status = "Local captures cleared.";
       await load();
     } catch (error) {
@@ -627,31 +659,6 @@
     });
   }
 
-  function titleProperties(): { key: string; value: string; placeholder: string }[] {
-    return [
-      {
-        key: "site",
-        value: hostname,
-        placeholder: "Site"
-      },
-      {
-        key: "author",
-        value: pageDraft?.source.author ?? "",
-        placeholder: "Author"
-      },
-      {
-        key: "created",
-        value: formatDate(pageDraft?.source.capturedAt),
-        placeholder: "Created"
-      },
-      {
-        key: "published",
-        value: formatDate(pageDraft?.source.publishedAt),
-        placeholder: "Published"
-      }
-    ];
-  }
-
   function contentPreview(): string {
     return (
       pageDraft?.content.selectionText ??
@@ -669,8 +676,8 @@
       links.push({ label: "Source", value: editUrl.trim() });
     }
 
-    if (pageDraft?.source.canonicalUrl && pageDraft.source.canonicalUrl !== editUrl.trim()) {
-      links.push({ label: "Canonical", value: pageDraft.source.canonicalUrl });
+    if (editCanonicalUrl.trim() && editCanonicalUrl.trim() !== editUrl.trim()) {
+      links.push({ label: "Canonical", value: editCanonicalUrl.trim() });
     }
 
     if (pageDraft?.context.threadUrl && pageDraft.context.threadUrl !== editUrl.trim()) {
@@ -729,8 +736,19 @@
           </svg>
         </button>
       </div>
-      <button class="utility-btn" disabled={busy} onclick={toggleSettings}>{showSettings ? "Close" : "Settings"}</button>
-      <div class="shortcut">⌘K</div>
+      <button
+        class="utility-btn icon-btn"
+        disabled={busy}
+        onclick={toggleSettings}
+        aria-label={showSettings ? "Close settings" : "Settings"}
+        title={showSettings ? "Close settings" : "Settings"}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 8.5a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7Z" />
+          <path d="M4.5 12h2.1m10.8 0h2.1M12 4.5v2.1m0 10.8v2.1" />
+          <path d="m6.7 6.7 1.5 1.5m7.6 7.6 1.5 1.5M17.8 6.7l-1.5 1.5m-7.6 7.6-1.5 1.5" />
+        </svg>
+      </button>
     </div>
   </header>
 
@@ -760,6 +778,41 @@
       </div>
 
       <div class="board-section">
+        <div class="section-label">CAPTURE</div>
+        <div class="settings-form compact-settings">
+          <label>
+            Default Clip
+            <select bind:value={settings.defaultCaptureMode}>
+              <option value="smart">Smart</option>
+              <option value="page">Page</option>
+              <option value="selection">Selection</option>
+              <option value="bookmark">Bookmark</option>
+            </select>
+          </label>
+          <label>
+            Article Cleanup
+            <select bind:value={settings.articleCleanupMode}>
+              <option value="smart">Smart clean</option>
+              <option value="reader">Reader strict</option>
+              <option value="loose">Loose capture</option>
+            </select>
+          </label>
+          <label>
+            Language
+            <input bind:value={settings.preferredLanguage} placeholder="auto or en" autocomplete="off" />
+          </label>
+          <label class="checkbox-setting">
+            <input type="checkbox" bind:checked={settings.includeImages} />
+            <span>Keep images</span>
+          </label>
+          <label class="checkbox-setting">
+            <input type="checkbox" bind:checked={settings.includeReplies} />
+            <span>Include replies</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="board-section">
         <div class="section-label">LOCAL DATA</div>
         <div class="settings-actions">
           <button class="extract-btn" disabled={busy} onclick={saveSettings}><span class="bracket">[</span>Save Settings<span class="bracket">]</span></button>
@@ -772,24 +825,43 @@
   {:else}
   <div class="sections clip-layout">
     <div class="board-section title-section">
-      <div class="section-label">TITLE</div>
+      <div class="section-label">Title</div>
       <input bind:value={editTitle} class="title-field" placeholder="Untitled clip" spellcheck="false" />
       <div class="meta-grid">
-        {#each titleProperties() as property}
-          <div class:empty-property={!property.value}>
-            <strong>{property.value || property.placeholder}</strong>
-          </div>
-        {/each}
+        <label class="meta-chip">
+          <span>Site</span>
+          <input bind:value={editSiteName} placeholder="Site" spellcheck="false" />
+        </label>
+        <label class="meta-chip">
+          <span>Author</span>
+          <input bind:value={editAuthor} placeholder="Author" spellcheck="false" />
+        </label>
+        <label class="meta-chip">
+          <span>Published</span>
+          <input bind:value={editPublishedAt} placeholder="Published" spellcheck="false" />
+        </label>
+        <label class="meta-chip">
+          <span>Captured</span>
+          <input bind:value={editCapturedAt} placeholder="Captured" spellcheck="false" />
+        </label>
+        <label class="meta-chip wide-meta-chip">
+          <span>URL</span>
+          <input bind:value={editUrl} placeholder="Source URL" spellcheck="false" />
+        </label>
+        <label class="meta-chip wide-meta-chip">
+          <span>Canonical</span>
+          <input bind:value={editCanonicalUrl} placeholder="Canonical URL" spellcheck="false" />
+        </label>
       </div>
     </div>
 
     <div class="board-section">
-      <div class="section-label">DESCRIPTION</div>
+      <div class="section-label">Description</div>
       <textarea bind:value={editDescription} rows="3" class="annotation-field" placeholder="Add context or summary..."></textarea>
     </div>
 
     <div class="board-section">
-      <div class="section-label">CONTENT</div>
+      <div class="section-label">Content</div>
       <div class="content-preview">
         {#if contentPreview()}
           {contentPreview()}
@@ -801,7 +873,7 @@
 
     <div class="section-grid">
       <div class="board-section">
-        <div class="section-label">LINKS</div>
+        <div class="section-label">Links</div>
         <div class="link-list">
           {#each sourceLinks() as link}
             <label>
@@ -816,7 +888,7 @@
       </div>
 
       <div class="board-section">
-        <div class="section-label">EMBEDS</div>
+        <div class="section-label">Embeds</div>
         <div class="embed-list">
           {#if pageDraft?.context.video}
             <input bind:value={editTimestamp} class="timestamp-input embed-timestamp" placeholder="Timestamp" spellcheck="false" />
@@ -835,7 +907,7 @@
     </div>
 
     <div class="board-section">
-      <div class="section-label">ORGANIZE</div>
+      <div class="section-label">Organize</div>
       <div class="section-content save-as-stack">
         <div class="nest-boxes">
           {#each boxes as box}
@@ -873,7 +945,7 @@
     </div>
 
     <div class="board-section positions-section">
-      <div class="section-label">SAVED POSITIONS</div>
+      <div class="section-label">Saved Positions</div>
       <div class="recent-list positions-list">
         {#if savedPositionCaptures().length === 0}
           <p class="empty">No saved positions for this page.</p>
@@ -923,7 +995,8 @@
   :global(#app) {
     width: var(--popup-width) !important;
     max-width: var(--popup-width) !important;
-    height: 600px !important;
+    height: auto !important;
+    min-height: 300px;
     max-height: 600px !important;
     overflow: hidden !important;
     scrollbar-width: none;
@@ -938,10 +1011,12 @@
   .board-layout {
     display: flex;
     flex-direction: column;
-    padding: 16px 20px;
+    padding: 16px 16px;
     background: var(--bg);
     width: var(--popup-width);
-    height: 600px;
+    height: auto;
+    min-height: 300px;
+    max-height: 600px;
     overflow: hidden;
     font-family: var(--font-sans);
   }
@@ -1023,12 +1098,6 @@
     box-shadow: inset 0 0 0 1px rgba(176, 148, 79, 0.35);
   }
 
-  .shortcut {
-    color: var(--border-focus);
-    font-family: var(--font-mono);
-    font-size: 11px;
-  }
-
   .sections {
     display: flex;
     flex-direction: column;
@@ -1043,13 +1112,19 @@
   }
 
   .board-section {
-    padding: 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
+    padding: 12px 0;
+    border: none;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 0;
     display: flex;
     flex-direction: column;
     gap: 8px;
-    background: rgba(255, 255, 255, 0.025);
+    background: transparent;
+    flex: 0 0 auto;
+  }
+
+  .board-section:last-child {
+    border-bottom: none;
   }
 
   .clip-layout {
@@ -1058,10 +1133,10 @@
 
   .section-label {
     font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 1px;
-    color: var(--text-muted);
-    text-transform: uppercase;
+    font-weight: 500;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+    text-transform: capitalize;
   }
 
   .section-content {
@@ -1086,60 +1161,95 @@
   }
 
   .title-section {
-    gap: 10px;
+    gap: 14px;
+    padding-bottom: 8px;
   }
 
   .title-field {
     width: 100%;
     background: transparent;
     border: none;
-    border-bottom: 1px solid var(--border);
     color: var(--text-main);
     font-family: inherit;
-    font-size: 18px;
-    font-weight: 600;
-    line-height: 1.25;
+    font-size: 16px;
+    font-weight: 500;
+    line-height: 1.3;
     outline: none;
-    padding: 0 0 8px;
-  }
-
-  .title-field:focus {
-    border-bottom-color: var(--border-focus);
+    padding: 0;
   }
 
   .meta-grid {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: 8px;
+    padding-bottom: 4px;
+    scrollbar-width: none;
+  }
+  .meta-grid::-webkit-scrollbar {
+    display: none;
+  }
+
+  .meta-chip {
+    flex: 0 0 auto;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: rgba(255, 255, 255, 0.04);
+    display: flex;
+    align-items: center;
     gap: 6px;
+    padding: 6px 10px;
+    transition: background 0.2s ease;
+  }
+
+  .wide-meta-chip {
+    flex: 0 0 auto;
   }
 
   .embed-row,
   .link-list label {
     min-width: 0;
-    border: 1px solid var(--border);
     border-radius: var(--radius-sm);
-    background: rgba(0, 0, 0, 0.12);
-    padding: 7px 8px;
-  }
-
-  .meta-grid div {
-    min-width: 0;
-    max-width: 124px;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    background: rgba(0, 0, 0, 0.12);
-    padding: 4px 8px;
+    background: rgba(255, 255, 255, 0.04);
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
   }
 
   .embed-row span,
   .link-list span {
-    display: block;
+    color: var(--text-dim);
+    font-size: 10px;
+    font-family: var(--font-mono);
+    line-height: 1;
+    margin-bottom: 0;
+    text-transform: uppercase;
+  }
+
+  .meta-chip span {
     color: var(--text-dim);
     font-family: var(--font-mono);
-    font-size: 9px;
-    line-height: 1.2;
-    margin-bottom: 4px;
+    font-size: 10px;
+    line-height: 1;
+    margin-bottom: 0;
     text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  .meta-chip input {
+    width: auto;
+    min-width: 60px;
+    background: transparent;
+    border: none;
+    color: var(--text-main);
+    font-size: 11px;
+    outline: none;
+    padding: 0;
+  }
+
+  .meta-chip:focus-within {
+    background: rgba(255, 255, 255, 0.08);
   }
 
   .embed-row strong {
@@ -1153,10 +1263,12 @@
     font-weight: 500;
   }
 
-  .meta-grid strong {
-    display: block;
+  .meta-chip input {
     min-width: 0;
+    width: 100%;
     overflow: hidden;
+    border: none;
+    background: transparent;
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--text-muted);
@@ -1164,9 +1276,15 @@
     font-size: 10px;
     font-weight: 500;
     line-height: 1.25;
+    outline: none;
+    padding: 0;
   }
 
-  .meta-grid .empty-property strong {
+  .meta-chip:focus-within {
+    border-color: var(--border-focus);
+  }
+
+  .meta-chip input::placeholder {
     color: var(--text-dim);
   }
 
@@ -1174,22 +1292,23 @@
     min-height: 62px;
     max-height: 150px;
     width: 100%;
-    background: rgba(0, 0, 0, 0.16);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
+    background: transparent;
+    border: none;
+    border-left: 2px solid rgba(255, 255, 255, 0.1);
+    border-radius: 0;
     color: var(--text-main);
     font-family: inherit;
     font-size: 13px;
     line-height: 1.45;
     outline: none;
-    padding: 8px;
+    padding: 2px 8px;
     resize: vertical;
     white-space: pre-wrap;
     word-wrap: break-word;
   }
 
   .annotation-field:focus {
-    border-color: var(--border-focus);
+    border-left-color: var(--border-focus);
   }
 
   .content-preview {
@@ -1208,7 +1327,8 @@
   .section-grid {
     display: grid;
     grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.75fr);
-    gap: 10px;
+    gap: 12px;
+    align-items: start;
   }
 
   .link-list,
@@ -1217,6 +1337,22 @@
     flex-direction: column;
     gap: 6px;
     min-width: 0;
+    max-height: 118px;
+    overflow-y: auto;
+    padding-right: 4px;
+    scrollbar-color: var(--border-focus) transparent;
+    scrollbar-width: thin;
+  }
+
+  .link-list::-webkit-scrollbar,
+  .embed-list::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  .link-list::-webkit-scrollbar-thumb,
+  .embed-list::-webkit-scrollbar-thumb {
+    background: var(--border-focus);
+    border-radius: 999px;
   }
 
   .link-list input {
@@ -1304,6 +1440,28 @@
     border-color: var(--border-focus);
   }
 
+  .icon-btn {
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  .icon-btn svg {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
   .danger:hover:not(:disabled) {
     color: #d77;
   }
@@ -1336,7 +1494,8 @@
     text-transform: uppercase;
   }
 
-  .settings-form input {
+  .settings-form input,
+  .settings-form select {
     background: transparent;
     border: none;
     border-bottom: 1px solid var(--border);
@@ -1346,8 +1505,41 @@
     padding: 0 0 8px 0;
   }
 
-  .settings-form input:focus {
+  .settings-form select {
+    color-scheme: dark;
+  }
+
+  .settings-form input:focus,
+  .settings-form select:focus {
     border-bottom-color: var(--border-focus);
+  }
+
+  .compact-settings {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .compact-settings label:not(.checkbox-setting):nth-child(3) {
+    grid-column: 1 / -1;
+  }
+
+  .checkbox-setting {
+    align-items: center;
+    flex-direction: row !important;
+    gap: 8px !important;
+    text-transform: none !important;
+  }
+
+  .checkbox-setting input {
+    accent-color: var(--border-focus);
+    border: none;
+    padding: 0;
+    width: 14px;
+  }
+
+  .checkbox-setting span {
+    color: var(--text-muted);
   }
 
   .settings-actions {

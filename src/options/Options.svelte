@@ -14,7 +14,12 @@
   let settings: StrixClipperSettings = {
     apiBaseUrl: "",
     apiToken: "",
-    defaultDestination: "library"
+    defaultDestination: "library",
+    defaultCaptureMode: "smart",
+    articleCleanupMode: "smart",
+    includeImages: true,
+    includeReplies: false,
+    preferredLanguage: ""
   };
   let stats: CaptureStats = {
     total: 0,
@@ -148,6 +153,48 @@
   </section>
 
   <section>
+    <h2>Capture</h2>
+    <div class="form two-column">
+      <label>
+        Default Clip
+        <select bind:value={settings.defaultCaptureMode}>
+          <option value="smart">Smart</option>
+          <option value="page">Page</option>
+          <option value="selection">Selection</option>
+          <option value="bookmark">Bookmark</option>
+        </select>
+      </label>
+      <label>
+        Article Cleanup
+        <select bind:value={settings.articleCleanupMode}>
+          <option value="smart">Smart clean</option>
+          <option value="reader">Reader strict</option>
+          <option value="loose">Loose capture</option>
+        </select>
+      </label>
+      <label>
+        Language
+        <input
+          bind:value={settings.preferredLanguage}
+          placeholder="auto or en"
+          autocomplete="off"
+        />
+      </label>
+      <label class="check-row">
+        <input type="checkbox" bind:checked={settings.includeImages} />
+        Keep images
+      </label>
+      <label class="check-row">
+        <input type="checkbox" bind:checked={settings.includeReplies} />
+        Include replies
+      </label>
+    </div>
+    <div class="row">
+      <button class="primary" type="button" disabled={busy} onclick={save}>Save Settings</button>
+    </div>
+  </section>
+
+  <section>
     <h2>Local Data</h2>
     <div class="stats">
       <span>{stats.total}<br/><small>TOTAL</small></span>
@@ -225,6 +272,54 @@
     display: flex;
     flex-direction: column;
     gap: 20px;
+  }
+
+  .two-column {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .form label {
+    color: var(--text-muted);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+  }
+
+  .form input,
+  .form select {
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-main);
+    font-size: 14px;
+    outline: none;
+    padding: 0 0 8px;
+  }
+
+  .form select {
+    color-scheme: dark;
+  }
+
+  .form input:focus,
+  .form select:focus {
+    border-bottom-color: var(--border-focus);
+  }
+
+  .check-row {
+    align-items: center;
+    flex-direction: row !important;
+    text-transform: none !important;
+  }
+
+  .check-row input {
+    accent-color: var(--border-focus);
+    border: none;
+    padding: 0;
+    width: 14px;
   }
 
   .row {

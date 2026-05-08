@@ -1,6 +1,6 @@
 import browser from "webextension-polyfill";
 import type { BackgroundMessage } from "../lib/messages";
-import { getSettings, saveSettings } from "../lib/settings";
+import { extractionSettingsFrom, getSettings, saveSettings } from "../lib/settings";
 import {
   clearCaptures,
   createCapture,
@@ -10,39 +10,123 @@ import {
   listCaptures,
   listCapturesForPage
 } from "../lib/storage";
+import { captureToMarkdown } from "../lib/markdown";
 import { syncCaptures } from "../lib/strixApi";
 import type { CaptureContext, CaptureDraft } from "../types/capture";
 
-const IMAGE_MENU_ID = "strix-save-image";
+const ROOT_MENU_ID = "strix-root";
+const SAVE_PAGE_MENU_ID = "strix-save-page";
+const COPY_PAGE_MENU_ID = "strix-copy-page";
+const SAVE_IMAGE_MENU_ID = "strix-save-image";
 const ADD_HIGHLIGHT_MENU_ID = "strix-add-selection-highlight";
+const CLIP_HIGHLIGHTS_MENU_ID = "strix-clip-highlights";
+const START_HIGHLIGHT_MENU_ID = "strix-start-highlighter";
+const STOP_HIGHLIGHT_MENU_ID = "strix-stop-highlighter";
 const pendingRestores = new Map<
   number,
   Pick<CaptureContext, "scrollX" | "scrollY" | "textQuote" | "formState">
 >();
+let contextMenuSetup: Promise<unknown> = Promise.resolve();
 
-browser.runtime.onInstalled.addListener(async () => {
+browser.runtime.onInstalled.addListener(() => {
+  queueContextMenuSetup();
+});
+browser.runtime.onStartup.addListener(() => {
+  queueContextMenuSetup();
+});
+queueContextMenuSetup();
+
+function queueContextMenuSetup(): void {
+  contextMenuSetup = contextMenuSetup.then(setupContextMenus, setupContextMenus).catch(() => undefined);
+}
+
+async function setupContextMenus(): Promise<void> {
   await browser.contextMenus.removeAll();
   await browser.contextMenus.create({
-    id: IMAGE_MENU_ID,
-    title: "Save image to Strix",
+    id: ROOT_MENU_ID,
+    title: "Strix Clipper",
+    contexts: ["page", "selection", "image"]
+  });
+  await browser.contextMenus.create({
+    id: SAVE_PAGE_MENU_ID,
+    parentId: ROOT_MENU_ID,
+    title: "Save this page",
+    contexts: ["page", "selection", "image"]
+  });
+  await browser.contextMenus.create({
+    id: COPY_PAGE_MENU_ID,
+    parentId: ROOT_MENU_ID,
+    title: "Copy to clipboard",
+    contexts: ["page", "selection"]
+  });
+  await browser.contextMenus.create({
+    id: SAVE_IMAGE_MENU_ID,
+    parentId: ROOT_MENU_ID,
+    title: "Save image",
     contexts: ["image"]
   });
   await browser.contextMenus.create({
     id: ADD_HIGHLIGHT_MENU_ID,
+    parentId: ROOT_MENU_ID,
     title: "Add to highlights",
     contexts: ["selection"]
   });
-});
+  await browser.contextMenus.create({
+    id: CLIP_HIGHLIGHTS_MENU_ID,
+    parentId: ROOT_MENU_ID,
+    title: "Clip highlights",
+    contexts: ["page", "selection"]
+  });
+  await browser.contextMenus.create({
+    id: START_HIGHLIGHT_MENU_ID,
+    parentId: ROOT_MENU_ID,
+    title: "Start highlighter",
+    contexts: ["page", "selection"]
+  });
+  await browser.contextMenus.create({
+    id: STOP_HIGHLIGHT_MENU_ID,
+    parentId: ROOT_MENU_ID,
+    title: "Stop highlighter",
+    contexts: ["page", "selection"]
+  });
+}
 
 browser.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (info.menuItemId === ADD_HIGHLIGHT_MENU_ID) {
-    if (tab?.id) {
-      await sendContentMessage(tab.id, { type: "strix:add-selection-highlight" }).catch(() => undefined);
-    }
+  if (!tab?.id) {
     return;
   }
 
-  if (info.menuItemId !== IMAGE_MENU_ID || !info.srcUrl) {
+  if (info.menuItemId === SAVE_PAGE_MENU_ID) {
+    await savePageFromTab(tab.id).catch(() => undefined);
+    return;
+  }
+
+  if (info.menuItemId === COPY_PAGE_MENU_ID) {
+    await copyPageMarkdownFromTab(tab.id).catch(() => undefined);
+    return;
+  }
+
+  if (info.menuItemId === ADD_HIGHLIGHT_MENU_ID) {
+    await sendContentMessage(tab.id, { type: "strix:add-selection-highlight" }).catch(() => undefined);
+    return;
+  }
+
+  if (info.menuItemId === CLIP_HIGHLIGHTS_MENU_ID) {
+    await sendContentMessage(tab.id, { type: "strix:clip-page-highlights" }).catch(() => undefined);
+    return;
+  }
+
+  if (info.menuItemId === START_HIGHLIGHT_MENU_ID) {
+    await sendContentMessage(tab.id, { type: "strix:activate-highlight-mode" }).catch(() => undefined);
+    return;
+  }
+
+  if (info.menuItemId === STOP_HIGHLIGHT_MENU_ID) {
+    await sendContentMessage(tab.id, { type: "strix:deactivate-highlight-mode" }).catch(() => undefined);
+    return;
+  }
+
+  if (info.menuItemId !== SAVE_IMAGE_MENU_ID || !info.srcUrl) {
     return;
   }
 
@@ -69,6 +153,55 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
 
   await createCapture(draft);
 });
+
+async function savePageFromTab(tabId: number): Promise<void> {
+  const settings = await getSettings();
+  const draft = await sendContentMessage(tabId, {
+    type: "strix:extract",
+    kind: "smart",
+    defaultDestination: settings.defaultDestination,
+    extractionSettings: extractionSettingsFrom(settings)
+  }) as CaptureDraft;
+
+  await createCapture(draft);
+  await sendContentMessage(tabId, {
+    type: "strix:play-clip-feedback",
+    kind: draft.kind
+  }).catch(() => undefined);
+}
+
+async function copyPageMarkdownFromTab(tabId: number): Promise<void> {
+  const settings = await getSettings();
+  const draft = await sendContentMessage(tabId, {
+    type: "strix:extract",
+    kind: "smart",
+    defaultDestination: settings.defaultDestination,
+    extractionSettings: extractionSettingsFrom(settings)
+  }) as CaptureDraft;
+  const capture = await createCapture(draft);
+  const markdown = captureToMarkdown(capture);
+  const scriptingBrowser = browser as typeof browser & {
+    scripting?: {
+      executeScript(details: {
+        target: { tabId: number };
+        func: (value: string) => Promise<void>;
+        args: string[];
+      }): Promise<unknown[]>;
+    };
+  };
+
+  await scriptingBrowser.scripting?.executeScript({
+    target: { tabId },
+    args: [markdown],
+    func: async (value: string) => {
+      await navigator.clipboard.writeText(value);
+    }
+  });
+  await sendContentMessage(tabId, {
+    type: "strix:play-clip-feedback",
+    kind: capture.kind
+  }).catch(() => undefined);
+}
 
 function isMissingContentScriptError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -122,7 +255,11 @@ browser.runtime.onMessage.addListener((message: unknown) => {
     case "captures:open":
       return openCapture(request.captureId).then(() => ({ ok: true }));
     case "captures:clear":
-      return clearCaptures().then(() => ({ ok: true }));
+      return clearCaptures().then(async () => {
+        pendingRestores.clear();
+        await refreshHighlightsInOpenTabs();
+        return { ok: true };
+      });
     case "settings:get":
       return getSettings().then((settings) => ({ settings }));
     case "settings:set":
@@ -178,6 +315,19 @@ async function openCapture(captureId: string): Promise<void> {
       formState: capture.context.formState
     });
   }
+}
+
+async function refreshHighlightsInOpenTabs(): Promise<void> {
+  const tabs = await browser.tabs.query({});
+  await Promise.all(
+    tabs
+      .filter((tab) => tab.id && tab.url && /^https?:\/\//.test(tab.url))
+      .map((tab) =>
+        browser.tabs.sendMessage(tab.id as number, {
+          type: "strix:refresh-highlights"
+        }).catch(() => undefined)
+      )
+  );
 }
 
 function urlWithTextFragment(url: string, text?: string): string {

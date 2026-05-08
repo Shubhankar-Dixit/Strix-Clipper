@@ -1,5 +1,6 @@
 import type {
   CaptureDestinationTarget,
+  CaptureExtractionSettings,
   CaptureDraft,
   CaptureRecord,
   CaptureStats,
@@ -21,6 +22,7 @@ export type ContentMessage =
       type: "strix:extract";
       kind: ContentExtractKind;
       defaultDestination?: CaptureDestinationTarget;
+      extractionSettings?: Partial<CaptureExtractionSettings>;
     }
   | {
       type: "strix:activate-highlight-mode";
@@ -30,6 +32,12 @@ export type ContentMessage =
     }
   | {
       type: "strix:add-selection-highlight";
+    }
+  | {
+      type: "strix:clip-page-highlights";
+    }
+  | {
+      type: "strix:deactivate-highlight-mode";
     }
   | {
       type: "strix:play-clip-feedback";

@@ -1,4 +1,5 @@
 import { Readability } from "@mozilla/readability";
+import Defuddle from "defuddle";
 import TurndownService from "turndown";
 import type {
   ContentMessage,
@@ -8,6 +9,7 @@ import type {
 } from "../lib/messages";
 import type {
   CaptureDestinationTarget,
+  CaptureExtractionSettings,
   CaptureDraft,
   CaptureRecord,
   CaptureSource,
@@ -36,8 +38,19 @@ const READABILITY_OPTIONS = {
   keepClasses: false,
   linkDensityModifier: -0.05
 };
+const DEFAULT_EXTRACTION_SETTINGS: CaptureExtractionSettings = {
+  defaultCaptureMode: "smart",
+  articleCleanupMode: "smart",
+  includeImages: true,
+  includeReplies: false,
+  preferredLanguage: ""
+};
 
 type ExtractedArticle = {
+  title?: string;
+  author?: string;
+  publishedAt?: string;
+  siteName?: string;
   text?: string;
   markdown?: string;
   html?: string;
@@ -47,7 +60,7 @@ type ExtractedArticle = {
 
 type SiteExtractor = {
   matches: (host: string) => boolean;
-  extract: (source: CaptureSource) => ExtractedArticle | undefined;
+  extract: (source: CaptureSource, settings: CaptureExtractionSettings) => ExtractedArticle | undefined;
 };
 
 let pageHighlights: CaptureRecord[] = [];
@@ -171,20 +184,33 @@ function getFaviconUrl(): string | undefined {
 
 function getSource(): CaptureSource {
   const capturedAt = new Date().toISOString();
-  const jsonTitle = jsonLdValues("headline")[0] ?? jsonLdValues("name")[0];
+  const visibleTitle = firstText(["#firstHeading", "main h1", "article h1", "[role='main'] h1", "h1"]);
+  const jsonTitle = jsonLdValues("headline")[0];
   const jsonAuthor = jsonLdValues("author")[0];
   const jsonPublished = jsonLdValues("datePublished")[0];
+  const redditRoot = isRedditHost() ? redditPostRoot() : undefined;
+  const redditTitle = redditRoot
+    ? redditAttribute(redditRoot, ["post-title", "data-title"]) ??
+      redditTextFromSelectors(redditRoot, ["h1", "[slot='title']", "a.title", "[data-testid='post-title']"])
+    : undefined;
+  const redditAuthor = redditRoot
+    ? redditAttribute(redditRoot, ["author", "data-author"]) ??
+      redditTextFromSelectors(redditRoot, ["[slot='authorName']", "a[href*='/user/']", ".author"])
+    : undefined;
 
   return {
     url: location.href,
     canonicalUrl: getCanonicalUrl(),
     title:
-      jsonTitle ??
+      redditTitle ??
+      visibleTitle ??
       meta('meta[property="og:title"]') ??
       meta('meta[name="twitter:title"]') ??
-      document.title,
+      jsonTitle ??
+      cleanDocumentTitle(document.title),
     siteName: meta('meta[property="og:site_name"]'),
     author:
+      redditAuthor ??
       meta('meta[name="author"]') ??
       meta('meta[property="article:author"]') ??
       jsonAuthor ??
@@ -208,6 +234,42 @@ function getViewport() {
 
 function normalizeWhitespace(text: string): string {
   return text.replace(/\u00a0/g, " ").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]{2,}/g, " ").trim();
+}
+
+function cleanDocumentTitle(title: string | undefined): string | undefined {
+  if (!title) {
+    return undefined;
+  }
+
+  return normalizeWhitespace(title)
+    .replace(/\s+-\s+Wikipedia$/i, "")
+    .replace(/\s+\|\s+Wikipedia$/i, "")
+    .trim() || undefined;
+}
+
+function normalizeExtractionSettings(
+  settings: Partial<CaptureExtractionSettings> | undefined
+): CaptureExtractionSettings {
+  return {
+    ...DEFAULT_EXTRACTION_SETTINGS,
+    ...settings,
+    defaultCaptureMode:
+      settings?.defaultCaptureMode === "page" ||
+      settings?.defaultCaptureMode === "selection" ||
+      settings?.defaultCaptureMode === "bookmark" ||
+      settings?.defaultCaptureMode === "smart"
+        ? settings.defaultCaptureMode
+        : DEFAULT_EXTRACTION_SETTINGS.defaultCaptureMode,
+    articleCleanupMode:
+      settings?.articleCleanupMode === "reader" ||
+      settings?.articleCleanupMode === "loose" ||
+      settings?.articleCleanupMode === "smart"
+        ? settings.articleCleanupMode
+        : DEFAULT_EXTRACTION_SETTINGS.articleCleanupMode,
+    includeImages: settings?.includeImages !== false,
+    includeReplies: settings?.includeReplies === true,
+    preferredLanguage: settings?.preferredLanguage?.trim() ?? ""
+  };
 }
 
 function truncate(value: string | undefined, maxLength: number): string | undefined {
@@ -339,6 +401,46 @@ function extractReadability(): ExtractedArticle | undefined {
   };
 }
 
+function extractDefuddle(
+  source: CaptureSource,
+  settings: CaptureExtractionSettings
+): ExtractedArticle | undefined {
+  const result = new Defuddle(document, {
+    url: source.url,
+    markdown: false,
+    separateMarkdown: false,
+    removeImages: !settings.includeImages,
+    includeReplies: settings.includeReplies,
+    language: settings.preferredLanguage || document.documentElement.lang || undefined,
+    useAsync: false,
+    removeLowScoring: settings.articleCleanupMode !== "loose",
+    standardize: true
+  }).parse();
+
+  const content = result.content || "";
+  const fragment = content
+    ? document.createRange().createContextualFragment(content)
+    : undefined;
+  const contentDocument = fragment ? documentFromFragment(fragment) : undefined;
+  const text = normalizeWhitespace(contentDocument?.body?.innerText || contentDocument?.body?.textContent || "");
+
+  if (!content || text.length < 40) {
+    return undefined;
+  }
+
+  return {
+    title: cleanDocumentTitle(result.title) ?? undefined,
+    author: normalizeWhitespace(result.author || "") || undefined,
+    publishedAt: normalizeWhitespace(result.published || "") || undefined,
+    siteName: normalizeWhitespace(result.site || result.domain || "") || undefined,
+    text: truncate(text, MAX_FALLBACK_TEXT_LENGTH),
+    markdown: truncate(turndown.turndown(content), MAX_MARKDOWN_LENGTH),
+    html: content,
+    excerpt: normalizeWhitespace(result.description || "") || pageDescription(),
+    imageUrls: settings.includeImages && contentDocument ? extractImageUrls(contentDocument) : undefined
+  };
+}
+
 function elementScore(element: HTMLElement): number {
   const text = normalizeWhitespace(element.innerText || "");
   const textLength = text.length;
@@ -406,6 +508,10 @@ function hostMatches(host: string, domains: string[]): boolean {
 
 function isSubstackHost(host = location.hostname.toLowerCase()): boolean {
   return hostMatches(host, ["substack.com"]) || host.includes("substack");
+}
+
+function isRedditHost(host = location.hostname.toLowerCase()): boolean {
+  return hostMatches(host, ["reddit.com"]);
 }
 
 function extractionRoot(selectors: string[]): HTMLElement | undefined {
@@ -476,6 +582,208 @@ function extractXPage(source: CaptureSource): ExtractedArticle | undefined {
     excerpt: text.slice(0, 280),
     imageUrls: extractImageUrls(document),
     html: articles.map((article) => article.outerHTML).join("\n")
+  };
+}
+
+function redditAttribute(element: Element | undefined, names: string[]): string | undefined {
+  if (!element) {
+    return undefined;
+  }
+
+  for (const name of names) {
+    const value = element.getAttribute(name)?.trim();
+    if (value) {
+      return normalizeWhitespace(value);
+    }
+  }
+
+  return undefined;
+}
+
+function redditCleanText(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const text = normalizeWhitespace(value)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => {
+      if (!line) {
+        return false;
+      }
+
+      return !/^(upvote|downvote|reply|share|save|hide|report|award|sort by|view discussions?|add a comment|log in|sign up)$/i.test(line);
+    })
+    .join("\n");
+
+  return text || undefined;
+}
+
+function redditTextFromSelectors(root: ParentNode, selectors: string[]): string | undefined {
+  for (const selector of selectors) {
+    const element = root.querySelector<HTMLElement>(selector);
+    const text = redditCleanText(element?.innerText || element?.textContent || undefined);
+    if (text) {
+      return text;
+    }
+  }
+
+  return undefined;
+}
+
+function redditMarkdownLink(label: string, value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  try {
+    const url = new URL(value, location.href).href;
+    return `[${label}](${url})`;
+  } catch {
+    return undefined;
+  }
+}
+
+function redditPostRoot(): HTMLElement | undefined {
+  const selection = window.getSelection();
+  const anchor = selection?.anchorNode;
+  const anchorElement =
+    anchor instanceof Element ? anchor : anchor?.parentElement ?? undefined;
+
+  return (
+    anchorElement?.closest<HTMLElement>("shreddit-post, [data-testid='post-container'], .thing.link, article") ??
+    document.querySelector<HTMLElement>("shreddit-post") ??
+    document.querySelector<HTMLElement>("[data-testid='post-container']") ??
+    document.querySelector<HTMLElement>(".thing.link") ??
+    document.querySelector<HTMLElement>("article")
+  ) ?? undefined;
+}
+
+function redditPostBody(root: ParentNode): string | undefined {
+  return redditTextFromSelectors(root, [
+    "[slot='text-body']",
+    "[data-post-click-location='text-body']",
+    "[data-testid='post-content']",
+    ".usertext-body .md",
+    ".expando .md",
+    "[data-click-id='text']",
+    "div[data-adclicklocation='media'] + div"
+  ]);
+}
+
+function redditCommentText(comment: HTMLElement): string | undefined {
+  return redditTextFromSelectors(comment, [
+    "[slot='comment']",
+    "[slot='comment-body']",
+    "[data-testid='comment']",
+    ".usertext-body .md",
+    ".md"
+  ]);
+}
+
+function redditCommentMarkdown(comment: HTMLElement): string | undefined {
+  const text = redditCommentText(comment);
+  if (!text || text.length < 12) {
+    return undefined;
+  }
+
+  const author =
+    redditAttribute(comment, ["author", "data-author"]) ??
+    redditTextFromSelectors(comment, ["[slot='commentMeta'] a[href*='/user/']", "a[href*='/user/']", ".author"]);
+  const score =
+    redditAttribute(comment, ["score", "data-score"]) ??
+    redditTextFromSelectors(comment, ["[slot='vote-score']", ".score"]);
+  const prefix = [author ? `u/${author.replace(/^u\//, "")}` : undefined, score].filter(Boolean).join(" - ");
+  const body = text
+    .split("\n")
+    .map((line) => `> ${line}`)
+    .join("\n");
+
+  return `${prefix ? `**${prefix}**\n` : ""}${body}`;
+}
+
+function redditTopComments(limit = 8): string[] {
+  const comments = [
+    ...document.querySelectorAll<HTMLElement>("shreddit-comment, [data-testid='comment'], .comment")
+  ].filter((comment) => !comment.closest(`#${TOOLBAR_ID}`));
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const comment of comments) {
+    const markdown = redditCommentMarkdown(comment);
+    if (!markdown) {
+      continue;
+    }
+
+    const key = markdown.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    result.push(markdown);
+
+    if (result.length >= limit) {
+      break;
+    }
+  }
+
+  return result;
+}
+
+function extractRedditPage(
+  source: CaptureSource,
+  settings: CaptureExtractionSettings
+): ExtractedArticle | undefined {
+  const root = redditPostRoot();
+  if (!root) {
+    return undefined;
+  }
+
+  const title =
+    redditAttribute(root, ["post-title", "data-title"]) ??
+    redditTextFromSelectors(root, ["h1", "[slot='title']", "a.title", "[data-testid='post-title']"]) ??
+    source.title?.replace(/\s*:\s*r\/.+$/i, "");
+  const author =
+    redditAttribute(root, ["author", "data-author"]) ??
+    redditTextFromSelectors(root, ["[slot='authorName']", "a[href*='/user/']", ".author"]);
+  const subreddit =
+    redditAttribute(root, ["subreddit-prefixed-name", "subreddit-name", "data-subreddit-prefixed-name", "data-subreddit"]) ??
+    redditTextFromSelectors(root, ["a[href^='/r/']", "a[href*='/r/']"]);
+  const score =
+    redditAttribute(root, ["score", "data-score"]) ??
+    redditTextFromSelectors(root, ["[slot='vote-score']", "[data-testid='vote-arrows'] faceplate-number", ".score"]);
+  const body = redditPostBody(root);
+  const contentHref = redditAttribute(root, ["content-href", "url", "data-url"]);
+  const outboundLink = redditMarkdownLink("Linked content", contentHref);
+  const permalink = redditAttribute(root, ["permalink", "data-permalink"]);
+  const redditLink = redditMarkdownLink("Reddit discussion", permalink ?? location.href);
+  const imageUrls = settings.includeImages ? extractImageUrls(root) ?? extractImageUrls(document) : undefined;
+  const comments = settings.includeReplies ? redditTopComments() : [];
+  const lines = [
+    title ? `# ${title}` : undefined,
+    subreddit || author || score
+      ? [subreddit, author ? `u/${author.replace(/^u\//, "")}` : undefined, score ? `${score} points` : undefined].filter(Boolean).join(" | ")
+      : undefined,
+    body,
+    outboundLink && contentHref !== permalink ? outboundLink : undefined,
+    redditLink,
+    comments.length ? `## Top comments\n\n${comments.join("\n\n")}` : undefined
+  ].filter(Boolean) as string[];
+  const markdown = lines.join("\n\n");
+  const text = redditCleanText(lines.join("\n\n"));
+
+  if (!text) {
+    return undefined;
+  }
+
+  return {
+    text: truncate(text, MAX_FALLBACK_TEXT_LENGTH),
+    markdown: truncate(markdown, MAX_MARKDOWN_LENGTH),
+    html: root.outerHTML,
+    excerpt: body ?? title ?? pageDescription(),
+    imageUrls
   };
 }
 
@@ -555,6 +863,10 @@ const siteExtractors: SiteExtractor[] = [
     extract: extractXPage
   },
   {
+    matches: isRedditHost,
+    extract: extractRedditPage
+  },
+  {
     matches: (host) => hostMatches(host, ["wikipedia.org"]),
     extract: extractWikipediaPage
   },
@@ -563,28 +875,76 @@ const siteExtractors: SiteExtractor[] = [
     extract: extractSubstackPage
   },
   {
-    matches: (host) => hostMatches(host, ["github.com", "reddit.com", "medium.com", "docs.github.com", "developer.mozilla.org", "stackoverflow.com"]),
+    matches: (host) => hostMatches(host, ["github.com", "medium.com", "docs.github.com", "developer.mozilla.org", "stackoverflow.com"]),
     extract: extractPopularPage
   }
 ];
 
-function extractArticle(source = getSource()): ExtractedArticle {
+function articleQuality(article: ExtractedArticle | undefined): number {
+  if (!article?.text) {
+    return 0;
+  }
+
+  const textLength = article.text.length;
+  const markdownLength = article.markdown?.length ?? 0;
+  const headingCount = (article.markdown?.match(/^#{1,3}\s+/gm) ?? []).length;
+  const linkCount = (article.markdown?.match(/\]\(/g) ?? []).length;
+  const linkPenalty = Math.min(linkCount * 20, textLength * 0.35);
+
+  return textLength + Math.min(markdownLength, textLength) * 0.15 + headingCount * 80 - linkPenalty;
+}
+
+function bestArticle(
+  candidates: (ExtractedArticle | undefined)[]
+): ExtractedArticle | undefined {
+  return candidates
+    .filter((candidate): candidate is ExtractedArticle => Boolean(candidate?.text || candidate?.markdown || candidate?.excerpt))
+    .sort((a, b) => articleQuality(b) - articleQuality(a))[0];
+}
+
+function extractArticle(
+  source = getSource(),
+  extractionSettings?: Partial<CaptureExtractionSettings>
+): ExtractedArticle {
+  const settings = normalizeExtractionSettings(extractionSettings);
   const host = location.hostname.toLowerCase();
   const siteSpecific = safeArticleExtraction(() =>
-    siteExtractors.find((extractor) => extractor.matches(host))?.extract(source)
+    siteExtractors.find((extractor) => extractor.matches(host))?.extract(source, settings)
   );
+  const defuddle = safeArticleExtraction(() => extractDefuddle(source, settings));
   const readability = safeArticleExtraction(extractReadability);
-  const fallback = !readability || (readability.text?.length ?? 0) < MIN_FALLBACK_TEXT_LENGTH
+  const fallback = settings.articleCleanupMode === "loose" || !readability || (readability.text?.length ?? 0) < MIN_FALLBACK_TEXT_LENGTH
     ? safeArticleExtraction(extractDensityFallback)
     : undefined;
-  const best = siteSpecific ?? readability ?? fallback;
+  const candidates =
+    settings.articleCleanupMode === "reader"
+      ? [readability, defuddle, siteSpecific, fallback]
+      : [defuddle, readability, siteSpecific, fallback];
+  const best =
+    settings.articleCleanupMode === "loose"
+      ? bestArticle(candidates)
+      : candidates.find((candidate) => (candidate?.text?.length ?? 0) >= 40 || Boolean(candidate?.markdown));
 
   return {
+    title: best?.title,
+    author: best?.author,
+    publishedAt: best?.publishedAt,
+    siteName: best?.siteName,
     text: best?.text ?? fallback?.text,
     markdown: best?.markdown ?? fallback?.markdown,
-    html: best?.html ?? readability?.html,
+    html: best?.html ?? readability?.html ?? defuddle?.html,
     excerpt: best?.excerpt ?? pageDescription(),
-    imageUrls: best?.imageUrls ?? readability?.imageUrls ?? fallback?.imageUrls
+    imageUrls: settings.includeImages ? best?.imageUrls ?? readability?.imageUrls ?? fallback?.imageUrls : undefined
+  };
+}
+
+function sourceWithArticleMetadata(source: CaptureSource, article: ExtractedArticle): CaptureSource {
+  return {
+    ...source,
+    title: article.title || source.title,
+    siteName: article.siteName || source.siteName,
+    author: article.author || source.author,
+    publishedAt: article.publishedAt || source.publishedAt
   };
 }
 
@@ -817,19 +1177,45 @@ function hasSubstackArticleContent(): boolean {
   return text.length >= 700 && paragraphCount >= 2;
 }
 
-function shouldWaitForArticleContent(kind: ContentExtractKind): boolean {
-  return isSubstackHost() && (kind === "smart" || kind === "page" || kind === "page-state");
+function hasRedditPostContent(): boolean {
+  if (!isRedditHost()) {
+    return false;
+  }
+
+  const root = redditPostRoot();
+  const title =
+    redditAttribute(root, ["post-title", "data-title"]) ??
+    redditTextFromSelectors(root ?? document, ["h1", "[slot='title']", "a.title", "[data-testid='post-title']"]);
+  const body = root ? redditPostBody(root) : undefined;
+
+  return Boolean(title || body);
 }
 
-async function waitForSubstackArticleContent(kind: ContentExtractKind): Promise<void> {
-  if (!shouldWaitForArticleContent(kind) || hasSubstackArticleContent()) {
+function shouldWaitForArticleContent(kind: ContentExtractKind): boolean {
+  return (isSubstackHost() || isRedditHost()) && (kind === "smart" || kind === "page" || kind === "page-state");
+}
+
+function hasSiteArticleContent(): boolean {
+  if (isSubstackHost()) {
+    return hasSubstackArticleContent();
+  }
+
+  if (isRedditHost()) {
+    return hasRedditPostContent();
+  }
+
+  return true;
+}
+
+async function waitForSiteArticleContent(kind: ContentExtractKind): Promise<void> {
+  if (!shouldWaitForArticleContent(kind) || hasSiteArticleContent()) {
     return;
   }
 
   const deadline = Date.now() + 1600;
   while (Date.now() < deadline) {
     await new Promise((resolve) => window.setTimeout(resolve, 120));
-    if (hasSubstackArticleContent()) {
+    if (hasSiteArticleContent()) {
       return;
     }
   }
@@ -1056,6 +1442,7 @@ function jumpToHighlight(): void {
 function extractDraft(message: Extract<ContentMessage, { type: "strix:extract" }>): CaptureDraft {
   const source = getSource();
   const selectionText = selectedText();
+  const extractionSettings = normalizeExtractionSettings(message.extractionSettings);
 
   if (message.kind === "smart") {
     if (hasVideoMoment()) {
@@ -1070,14 +1457,16 @@ function extractDraft(message: Extract<ContentMessage, { type: "strix:extract" }
       return extractDraft({
         type: "strix:extract",
         kind: "selection",
-        defaultDestination: message.defaultDestination
+        defaultDestination: message.defaultDestination,
+        extractionSettings
       });
     }
 
     return extractDraft({
       type: "strix:extract",
       kind: "page",
-      defaultDestination: message.defaultDestination
+      defaultDestination: message.defaultDestination,
+      extractionSettings
     });
   }
 
@@ -1129,13 +1518,14 @@ function extractDraft(message: Extract<ContentMessage, { type: "strix:extract" }
   }
 
   if (message.kind === "page-state") {
-    const article = extractArticle(source);
+    const article = extractArticle(source, extractionSettings);
+    const articleSource = sourceWithArticleMetadata(source, article);
     const formState = captureFormState(source);
     const fieldCount = formState.fields.length;
 
     return {
       kind: "page-state",
-      source,
+      source: articleSource,
       content: {
         ...article,
         selectionText,
@@ -1146,7 +1536,7 @@ function extractDraft(message: Extract<ContentMessage, { type: "strix:extract" }
         scrollY: window.scrollY,
         textQuote: selectionText,
         textFragment: textFragment(selectionText),
-        pageKey: getPageKey(source),
+        pageKey: getPageKey(articleSource),
         viewport: getViewport(),
         formState
       },
@@ -1154,10 +1544,11 @@ function extractDraft(message: Extract<ContentMessage, { type: "strix:extract" }
     };
   }
 
-  const article = extractArticle(source);
+  const article = extractArticle(source, extractionSettings);
+  const articleSource = sourceWithArticleMetadata(source, article);
   return {
     kind: "page",
-    source,
+    source: articleSource,
     content: {
       ...article,
       selectionText
@@ -1167,7 +1558,7 @@ function extractDraft(message: Extract<ContentMessage, { type: "strix:extract" }
       scrollY: window.scrollY,
       textQuote: selectionText,
       textFragment: textFragment(selectionText),
-      pageKey: getPageKey(source),
+      pageKey: getPageKey(articleSource),
       viewport: getViewport()
     },
     destination: destination(message.defaultDestination)
@@ -1175,7 +1566,7 @@ function extractDraft(message: Extract<ContentMessage, { type: "strix:extract" }
 }
 
 async function extractDraftAsync(message: Extract<ContentMessage, { type: "strix:extract" }>): Promise<CaptureDraft> {
-  await waitForSubstackArticleContent(message.kind);
+  await waitForSiteArticleContent(message.kind);
   return extractDraft(message);
 }
 
@@ -1234,6 +1625,19 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
       .then(() => sendResponse({ success: true }))
       .catch((error) => sendResponse({ success: false, error: error instanceof Error ? error.message : "Unable to add highlight." }));
     return true;
+  }
+
+  if (request.type === "strix:clip-page-highlights") {
+    clipHighlights()
+      .then(() => sendResponse({ success: true }))
+      .catch((error) => sendResponse({ success: false, error: error instanceof Error ? error.message : "Unable to clip highlights." }));
+    return true;
+  }
+
+  if (request.type === "strix:deactivate-highlight-mode") {
+    deactivateHighlightMode();
+    sendResponse({ success: true });
+    return false;
   }
 
   if (request.type === "strix:play-clip-feedback") {
@@ -1327,12 +1731,12 @@ function ensureToolbar(): HTMLDivElement {
     jumpToHighlight();
   });
 
-  const deleteButton = toolbarIconButton("strix-highlight-delete", "Delete current highlight", "M5 7h14M10 11v6M14 11v6M9 7l1-2h4l1 2M7 7l1 13h8l1-13");
+  const deleteButton = toolbarTextButton("strix-highlight-delete", "Delete selected highlight", "del");
   deleteButton.addEventListener("click", () => {
     deleteFocusedHighlight().catch(() => undefined);
   });
 
-  const closeButton = toolbarIconButton("strix-highlight-close", "Close highlighter", "M6 6l12 12M18 6L6 18");
+  const closeButton = toolbarTextButton("strix-highlight-close", "Close highlighter", "x");
   closeButton.addEventListener("click", () => {
     deactivateHighlightMode();
   });
@@ -1345,26 +1749,27 @@ function ensureToolbar(): HTMLDivElement {
   return toolbar;
 }
 
-function toolbarIconButton(id: string, label: string, path: string): HTMLButtonElement {
+function toolbarTextButton(id: string, label: string, text: string): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
   button.id = id;
   button.setAttribute("aria-label", label);
   button.title = label;
-  button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${path}" /></svg>`;
+  button.textContent = text;
   button.style.cssText = [
-    "width:32px",
+    "min-width:32px",
     "height:32px",
     "border:0",
     "border-radius:999px",
     "display:inline-flex",
     "align-items:center",
     "justify-content:center",
-    "padding:0",
+    "padding:0 9px",
     "background:rgba(255,255,255,0.08)",
-    "color:#d7d7d8"
+    "color:#d7d7d8",
+    "font:700 12px/1 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif",
+    "text-transform:uppercase"
   ].join(";");
-  button.querySelector("svg")?.setAttribute("style", "width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round");
   button.addEventListener("mousedown", (event) => event.preventDefault());
   return button;
 }
@@ -1676,6 +2081,27 @@ function restoreHighlight(capture: CaptureRecord): void {
   }
 
   wrapFirstTextMatch(quote, capture.id);
+  const element = document.querySelector<HTMLElement>(`[data-strix-capture-id="${capture.id}"]`);
+  if (element) {
+    bindHighlightElement(element, capture.id);
+  }
+}
+
+function bindHighlightElement(element: HTMLElement, captureId: string): void {
+  if (element.dataset.strixBound === "true") {
+    return;
+  }
+
+  element.dataset.strixBound = "true";
+  element.addEventListener("click", (event) => {
+    event.stopPropagation();
+    document.querySelectorAll<HTMLElement>(`.${HIGHLIGHT_ACTIVE_CLASS}`)
+      .forEach((highlight) => highlight.classList.remove(HIGHLIGHT_ACTIVE_CLASS));
+    element.classList.add(HIGHLIGHT_ACTIVE_CLASS);
+    activeHighlightId = captureId;
+    highlightFocusIndex = Math.max(0, pageHighlights.findIndex((highlight) => highlight.id === captureId));
+    renderToolbarState();
+  });
 }
 
 function renderToolbarState(): void {
@@ -1713,7 +2139,7 @@ async function deleteFocusedHighlight(): Promise<void> {
   const active = activeHighlightId
     ? pageHighlights.find((highlight) => highlight.id === activeHighlightId)
     : undefined;
-  const index = Math.max(0, Math.min(highlightFocusIndex, pageHighlights.length - 1));
+  const index = active ? pageHighlights.indexOf(active) : Math.max(0, Math.min(highlightFocusIndex - 1, pageHighlights.length - 1));
   await deleteHighlight(active ?? pageHighlights[index]);
 }
 
@@ -1866,6 +2292,7 @@ function wrapFirstTextMatch(quote: string, captureId: string): boolean {
   try {
     mark.append(range.extractContents());
     range.insertNode(mark);
+    bindHighlightElement(mark, captureId);
     return true;
   } catch {
     return false;
@@ -2056,6 +2483,11 @@ function restoreContext(
   }
 }
 
+function removeLegacyDropTarget(): void {
+  document.getElementById("strix-black-hole-drop")?.remove();
+  document.getElementById("strix-black-hole-style")?.remove();
+}
+
 document.addEventListener("mouseup", (event) => {
   if (event.target instanceof Element && event.target.closest(`#${TOOLBAR_ID}`)) {
     return;
@@ -2067,10 +2499,8 @@ document.addEventListener("mouseup", (event) => {
 document.addEventListener("keyup", () => window.setTimeout(() => {
   queueAutoHighlight();
 }, 0));
-document.addEventListener("selectionchange", () => window.setTimeout(() => {
-  queueAutoHighlight();
-}, 0));
 document.addEventListener("scroll", () => window.setTimeout(updateToolbarPosition, 0), { passive: true });
 
+removeLegacyDropTarget();
 ensureHighlightStyles();
 refreshPageHighlights().catch(() => undefined);
