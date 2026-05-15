@@ -3,7 +3,9 @@
 Strix Clipper is a local-first browser extension for saving pages, selections,
 bookmarks, and images into a local capture queue.
 
-The goal is to be able to make an extension that can let AI agents browse the web and capture parts of it and save it in the state that it's left in without losing any context. This means no
+The goal is to be able to make an extension that can let AI agents browse the web and capture parts of it and save it in the state that it's left in without losing any context. Bookmarks get cluttered and don't save content and the state of webpages properly which is what this is meant to solve.
+
+AI was used in bug fixes mainly and writing some boring rust code but majority of it was written by HI (Human intelligence).
 
 Phase 1 targets Chrome Manifest V3. Captures are stored in IndexedDB first, so
 the extension remains useful without a network connection or Strix API endpoint.
